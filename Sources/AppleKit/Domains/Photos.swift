@@ -166,6 +166,19 @@ private func photosCommands(_ ctx: Context) -> [Command] {
             let floor = try ctx.settings(PhotosSettings.self).minFreeGBAfterDownload
             return try await PhotosWriter().download(items, to: to, minFreeGB: floor)
         },
+        Command(["photos", "organize"], .write, "Add items to an album or take them out, or favorite or unfavorite them. Creates the album if it does not exist.",
+                [Param("ids", required: true, positional: true, "Item IDs, space or comma separated"),
+                 Param("action", required: true, "add-to-album, remove-from-album, favorite, or unfavorite"), Param("album", "Album name")]) { a in
+            let ids = try a.require("ids").split(whereSeparator: { $0 == "," || $0 == " " }).map(String.init)
+            let items = try PhotosStore(ctx).resolve(ids)
+            let act = try a.require("action")
+            if let album = a.string("album"), try ctx.settings(PhotosSettings.self).excludeAlbums.contains(where: { $0.lowercased() == album.lowercased() }) {
+                throw AppleError.hidden("album \(album)")
+            }
+            let detail = try await PhotosWriter().organize(items, action: act, album: a.string("album"))
+            Audit.write("photos organize", ["action": act, "count": items.count, "status": "ok"])
+            return Done(id: "\(items.count) item(s)", action: act, detail: detail)
+        },
         Command(["photos", "delete"], .destructive, "Move items to Recently Deleted. macOS asks you to confirm in its own dialog every time.",
                 [Param("ids", required: true, positional: true, "Item IDs, space or comma separated")]) { a in
             let ids = try a.require("ids").split(whereSeparator: { $0 == "," || $0 == " " }).map(String.init)
@@ -402,7 +415,8 @@ final class PhotosWriter {
         guard agent else { return URL(fileURLWithPath: (raw as NSString).expandingTildeInPath).standardizedFileURL }
         // One plain folder name only: no separators, no "..", no leading dot.
         let name = raw.trimmingCharacters(in: .whitespaces)
-        guard !name.isEmpty, !name.contains("/"), !name.contains(":"), name != "..", !name.hasPrefix(".") else {
+        guard !name.isEmpty, !name.contains("/"), !name.contains(":"), name != "..", !name.hasPrefix("."),
+              !name.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) else {
             throw AppleError.refused("over MCP, to must be a single folder name; files go to \(agentRoot)/<name>")
         }
         let fm = FileManager.default
@@ -464,6 +478,32 @@ final class PhotosWriter {
             }
         }
         return DownloadResult(folder: dir.path, saved: saved, skipped: skipped, failed: failed, bytes: bytes)
+    }
+
+    func organize(_ items: [PhotoItem], action: String, album: String?) async throws -> String {
+        let assets = try assets(items) as NSArray
+        switch action {
+        case "favorite", "unfavorite":
+            try await PHPhotoLibrary.shared().performChanges {
+                for case let a as PHAsset in assets { PHAssetChangeRequest(for: a).isFavorite = action == "favorite" }
+            }
+            return "\(items.count) item(s) \(action)d"
+        case "add-to-album", "remove-from-album":
+            guard let album, !album.isEmpty else { throw AppleError.invalid("\(action) needs --album") }
+            let found = PHAssetCollection.fetchAssetCollections(with: .album, subtype: .albumRegular, options: nil)
+            var match: PHAssetCollection?
+            found.enumerateObjects { c, _, stop in if c.localizedTitle?.lowercased() == album.lowercased() { match = c; stop.pointee = true } }
+            if match == nil && action == "remove-from-album" { throw AppleError.notFound("album \(album)") }
+            let existing = match
+            try await PHPhotoLibrary.shared().performChanges {
+                let req: PHAssetCollectionChangeRequest? = existing.map { PHAssetCollectionChangeRequest(for: $0) }
+                    ?? PHAssetCollectionChangeRequest.creationRequestForAssetCollection(withTitle: album)
+                if action == "add-to-album" { req?.addAssets(assets) } else { req?.removeAssets(assets) }
+            }
+            return existing == nil ? "created album \(album)" : "album \(album)"
+        default:
+            throw AppleError.invalid("action must be add-to-album, remove-from-album, favorite, or unfavorite")
+        }
     }
 
     /// PhotoKit shows the system confirmation dialog. Cancelling there throws.

@@ -180,6 +180,17 @@ private func messagesCommands(_ ctx: Context) -> [Command] {
         Command(["messages", "stats"], .read, "Counts by year, service, and chat across visible history.", [names]) { a in
             try MessagesStore(ctx, names: !a.bool("no-names")).stats()
         },
+        Command(["messages", "draft"], .write, "Draft a text for review. Nothing is sent until `messages send <draft-id>`; the draft is sent exactly as shown.",
+                [Param("to", required: true, positional: true, "Chat ID, group name, contact name, phone, or email"),
+                 Param("text", required: true, "The message text"), Param("file", "Path of a file to attach. Over MCP, it must be in ~/Downloads/apple-cli"),
+                 Param("sms", .boolean, "Send as SMS through your iPhone, not iMessage (new recipients only)")]) { a in
+            try MessageSender(ctx).draft(to: try a.require("to"), text: try a.require("text"),
+                                         file: try a.string("file").map { try checkOutgoingFile($0, viaMCP: a.viaMCP) }, sms: a.bool("sms"))
+        },
+        Command(["messages", "send"], .write, "Send a drafted text, exactly as drafted, then confirm it reached Messages' outbox.",
+                [Param("draft", required: true, positional: true, "Draft ID from messages draft")]) { a in
+            try MessageSender(ctx).send(try a.require("draft"))
+        },
     ]
 }
 
@@ -302,7 +313,7 @@ final class MessagesStore {
         return normalizeHandle(h).flatMap { names[$0] } ?? h
     }
 
-    private func hides(handle: String) -> Bool {
+    func hides(handle: String) -> Bool {
         let keys = handleKeys(handle)
         if keys.contains(where: { excludeHandles.contains($0) || hiddenHandles.contains($0) }) { return true }
         if let name = normalizeHandle(handle).flatMap({ names[$0] }), namePatterns.hidesTitle(name) { return true }
@@ -556,5 +567,122 @@ final class MessagesStore {
             if decoded?.replacingOccurrences(of: "\u{FFFC}", with: "") == text.replacingOccurrences(of: "\u{FFFC}", with: "") { agree += 1 }
         }
         return (agree, compared, bodyOnly)
+    }
+}
+
+// MARK: - Sending (Messages.app scripting, by chat ID or one participant)
+
+struct SendResult: Output {
+    /// sent, delivered, sending (not confirmed yet), or failed
+    let status: String
+    let to: String
+    let messageId: String?
+    let detail: String?
+    var text: String { "\(status): \(to)" + (detail.map { " (\($0))" } ?? "") }
+}
+
+final class MessageSender {
+    let ctx: Context
+    init(_ ctx: Context) { self.ctx = ctx }
+
+    func draft(to: String, text: String, file: String?, sms: Bool) throws -> DraftOutput {
+        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || file != nil else { throw AppleError.invalid("empty message") }
+        if (to + (file ?? "")).unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) {
+            throw AppleError.invalid("recipient and file path cannot contain line breaks or control characters")
+        }
+        let store = try MessagesStore(ctx, names: true)
+        var payload: [String: [String]] = ["text": [text], "file": file.map { [$0] } ?? []]
+        let label: String
+        // An existing chat (a group, or a person you have texted) is used as is; privacy-hidden chats never resolve.
+        if let chat = try? store.resolveChat(to) {
+            payload["chat"] = [chat.guid]
+            label = "\(chat.info.name) (\(chat.handles.joined(separator: ", ")), \(chat.info.service ?? "iMessage"))"
+        } else {
+            let handle: String
+            if to.contains("@") || to.filter(\.isNumber).count >= 7 {
+                handle = to.trimmingCharacters(in: .whitespaces)
+            } else {
+                let hits = try ContactsStore(ctx).search(to).map { contactInfo($0) }
+                guard hits.count == 1 else {
+                    throw hits.isEmpty ? AppleError.notFound("no chat or contact named \(to)")
+                        : AppleError.invalid("\(hits.count) contacts match \(to): " + hits.prefix(5).map(\.name).joined(separator: "; "))
+                }
+                guard let h = hits[0].phones.first?.value ?? hits[0].emails.first?.value else { throw AppleError.notFound("a phone or email for \(hits[0].name)") }
+                handle = h
+            }
+            if store.hides(handle: handle) { throw AppleError.hidden(to) }
+            payload["handle"] = [handle]
+            payload["service"] = [sms ? "SMS" : "iMessage"]
+            label = "\(store.displayName(handle)) (\(handle), new chat, \(sms ? "SMS" : "iMessage"))"
+        }
+        let summary = "To: \(label)\n" + (file.map { "Attachment: \(($0 as NSString).lastPathComponent)\n" } ?? "") + "Text: \(text)"
+        let d = try Draft.save(kind: "message", summary: summary, payload: payload)
+        Audit.write("messages draft", ["draft": d.id, "to": label, "chars": text.count])
+        return DraftOutput(d, sendWith: "apple-cli messages send \(d.id)")
+    }
+
+    func send(_ id: String) throws -> SendResult {
+        try Audit.withSendSlot(ctx) { try sendNow(id) }
+    }
+
+    private func sendNow(_ id: String) throws -> SendResult {
+        let d = try Draft.take(id, kind: "message")
+        let text = d.payload["text"]?.first ?? "", file = d.payload["file"]?.first
+        let to = d.summary.split(separator: "\n").first.map { String($0.dropFirst(4)) } ?? "?"
+        let started = Date()
+        // The text and target travel as argv, never spliced into the script.
+        let script = """
+            on run argv
+                set {kind, target, svcName, msg, filePath} to argv
+                tell application "Messages"
+                    if kind is "chat" then
+                        set dest to chat id target
+                    else
+                        if svcName is "SMS" then
+                            set svc to first account whose service type is SMS
+                        else
+                            set svc to first account whose service type is iMessage
+                        end if
+                        set dest to participant target of svc
+                    end if
+                    if msg is not "" then send msg to dest
+                    if filePath is not "" then send (POSIX file filePath) to dest
+                end tell
+            end run
+            """
+        let target = d.payload["chat"]?.first ?? d.payload["handle"]?.first ?? ""
+        do {
+            _ = try Osascript.run(script, [d.payload["chat"] != nil ? "chat" : "participant", target, d.payload["service"]?.first ?? "iMessage",
+                                           text, file ?? ""], app: "Messages", timeout: 30)
+        } catch {
+            Audit.write("messages send", ["draft": id, "to": to, "status": "failed", "error": AppleError.wrap(error).description])
+            throw error
+        }
+        let result = confirm(target: target, isChat: d.payload["chat"] != nil, text: text, since: started, to: to)
+        Audit.write("messages send", ["draft": id, "to": to, "status": result.status, "chars": text.count])
+        return result
+    }
+
+    /// Watches chat.db for the outgoing row for up to 15 seconds and reports what Messages did with it.
+    private func confirm(target: String, isChat: Bool, text: String, since: Date, to: String) -> SendResult {
+        let deadline = Date().addingTimeInterval(15)
+        var last: [String: Any]?
+        while Date() < deadline {
+            usleep(500_000)
+            guard let db = try? SQLiteReader(path: MessagesStore.path) else { continue }
+            let rows = (try? db.query("""
+                SELECT m.guid, m.text, m.is_sent, m.is_delivered, m.error FROM message m
+                JOIN chat_message_join j ON j.message_id = m.ROWID JOIN chat c ON c.ROWID = j.chat_id
+                WHERE m.is_from_me = 1 AND m.date >= ? AND (c.guid = ? OR c.chat_identifier = ?)
+                ORDER BY m.date DESC LIMIT 5
+                """, [MessagesStore.raw(since.addingTimeInterval(-2)), target, target])) ?? []
+            guard let r = rows.first(where: { text.isEmpty || ($0.str("text") ?? "") == text }) ?? rows.first else { continue }
+            last = r
+            if (r.int("error") ?? 0) != 0 { return SendResult(status: "failed", to: to, messageId: r.str("guid"), detail: "Messages error \(r.int("error")!)") }
+            if r.bool("is_delivered") { return SendResult(status: "delivered", to: to, messageId: r.str("guid"), detail: nil) }
+            if r.bool("is_sent") { return SendResult(status: "sent", to: to, messageId: r.str("guid"), detail: nil) }
+        }
+        return SendResult(status: "sending", to: to, messageId: last?.str("guid"),
+                          detail: last == nil ? "Messages accepted it but it has not appeared in chat.db yet" : "not confirmed sent within 15 s")
     }
 }

@@ -341,3 +341,108 @@ enum OwnApp {
         executable.map { $0.hasSuffix(".app/Contents/MacOS/apple-cli") ? String($0.dropLast("/Contents/MacOS/apple-cli".count)) : $0 }
     }
 }
+
+// MARK: - Drafts, audit log, and send limit
+
+/// Anything that leaves the Mac (a text, an email) is drafted first and sent by draft ID, so what was
+/// shown is exactly what goes out. Drafts are files in ~/.config/apple-cli/drafts (mode 600), so a
+/// CLI call can send what an earlier call drafted. Each expires after an hour and sends at most once.
+struct Draft: Codable {
+    let id: String
+    let kind: String              // "message" or "mail"
+    let created: Date
+    /// What the sender sees: recipients, subject, text.
+    let summary: String
+    /// Everything the sender needs, resolved at draft time (chat ID, handles, account, body).
+    let payload: [String: [String]]
+
+    static let ttl: TimeInterval = 3600
+    static var dir: String { (Context.configPath as NSString).deletingLastPathComponent + "/drafts" }
+
+    static func save(kind: String, summary: String, payload: [String: [String]]) throws -> Draft {
+        let d = Draft(id: "d_" + UUID().uuidString.prefix(8).lowercased(), kind: kind, created: Date(), summary: summary, payload: payload)
+        try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        let path = dir + "/\(d.id).json"
+        FileManager.default.createFile(atPath: path, contents: try JSONEncoder().encode(d), attributes: [.posixPermissions: 0o600])
+        return d
+    }
+
+    /// Loads and removes a draft in one step, so two sends of the same ID cannot both go out.
+    static func take(_ id: String, kind: String) throws -> Draft {
+        guard id.range(of: #"^d_[0-9a-f]{8}$"#, options: .regularExpression) != nil else { throw AppleError.invalid("draft ID looks like d_1a2b3c4d") }
+        let path = dir + "/\(id).json", claimed = path + ".sending"
+        guard rename(path, claimed) == 0 else { throw AppleError.notFound("draft \(id) (already sent, expired, or never made)") }
+        defer { unlink(claimed) }
+        let d = try JSONDecoder().decode(Draft.self, from: Data(contentsOf: URL(fileURLWithPath: claimed)))
+        guard d.kind == kind else { throw AppleError.invalid("\(id) is a \(d.kind) draft") }
+        guard Date().timeIntervalSince(d.created) < ttl else { throw AppleError.refused("draft \(id) expired; draft it again") }
+        return d
+    }
+}
+
+struct DraftOutput: Output {
+    let draftId: String
+    let summary: String
+    let expires: Date
+    let sendWith: String
+    var text: String { "\(summary)\n\ndraft \(draftId), expires \(localISO.string(from: expires)). Send with: \(sendWith)" }
+    init(_ d: Draft, sendWith: String) {
+        draftId = d.id; summary = d.summary; expires = d.created.addingTimeInterval(Draft.ttl); self.sendWith = sendWith
+    }
+}
+
+/// One JSON line per write, in ~/Library/Logs/apple-cli/audit.log: time, command, target, and outcome.
+/// Never message text or email bodies.
+enum Audit {
+    static let path = NSHomeDirectory() + "/Library/Logs/apple-cli/audit.log"
+
+    static func write(_ command: String, _ fields: [String: Any]) {
+        var line = fields
+        line["time"] = localISO.string(from: Date()); line["command"] = command
+        guard let data = try? JSONSerialization.data(withJSONObject: line, options: [.sortedKeys, .withoutEscapingSlashes]) else { return }
+        try? FileManager.default.createDirectory(atPath: (path as NSString).deletingLastPathComponent, withIntermediateDirectories: true)
+        if !FileManager.default.fileExists(atPath: path) { FileManager.default.createFile(atPath: path, contents: nil, attributes: [.posixPermissions: 0o600]) }
+        guard let h = FileHandle(forWritingAtPath: path) else { return }
+        h.seekToEndOfFile(); h.write(data + Data("\n".utf8)); try? h.close()
+    }
+
+    /// Send times only, one per line, kept apart from the audit log so other writes cannot push sends out of view.
+    static let sendLog = NSHomeDirectory() + "/Library/Logs/apple-cli/sends.log"
+
+    /// Runs one send under an exclusive lock: count the last hour, refuse past the limit (config
+    /// `send.sendsPerHour`, default 30), send, and record it. Parallel sends wait their turn.
+    static func withSendSlot<T>(_ ctx: Context, _ send: () throws -> T) throws -> T {
+        let limit = (try? ctx.settings(SendSettings.self).sendsPerHour) ?? SendSettings.defaults.sendsPerHour
+        try FileManager.default.createDirectory(atPath: (sendLog as NSString).deletingLastPathComponent, withIntermediateDirectories: true)
+        let fd = open(sendLog + ".lock", O_CREAT | O_RDWR, 0o600)
+        guard fd >= 0 else { throw AppleError.refused("cannot open the send lock, so the send limit cannot be checked") }
+        defer { flock(fd, LOCK_UN); close(fd) }
+        flock(fd, LOCK_EX)
+        let cutoff = Date().addingTimeInterval(-3600).timeIntervalSince1970
+        var recent: [Double] = []
+        if FileManager.default.fileExists(atPath: sendLog) {
+            guard let text = try? String(contentsOfFile: sendLog, encoding: .utf8) else { throw AppleError.refused("cannot read \(sendLog), so the send limit cannot be checked") }
+            recent = text.split(separator: "\n").compactMap { Double($0) }.filter { $0 > cutoff }
+        }
+        if recent.count >= limit { throw AppleError.refused("\(recent.count) sends in the last hour, at the limit of \(limit) (config send.sendsPerHour)") }
+        // Recorded before sending, so a send that hangs or crashes still counts.
+        recent.append(Date().timeIntervalSince1970)
+        FileManager.default.createFile(atPath: sendLog, contents: Data(recent.map { String($0) }.joined(separator: "\n").utf8), attributes: [.posixPermissions: 0o600])
+        return try send()
+    }
+}
+
+struct SendSettings: DomainSettings {
+    static let key = "send"
+    /// Texts plus emails per rolling hour. A runaway agent stops here.
+    var sendsPerHour: Int
+    static let defaults = SendSettings(sendsPerHour: 30)
+}
+
+/// What a write did, for writes with nothing richer to return.
+struct Done: Output {
+    let id: String
+    let action: String
+    var detail: String? = nil
+    var text: String { "\(action): \(id)" + (detail.map { " (\($0))" } ?? "") }
+}

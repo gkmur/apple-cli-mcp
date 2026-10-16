@@ -39,6 +39,7 @@ apple-cli reminders list [--list NAME] [--completed] [--limit N]
 apple-cli reminders due-today
 apple-cli reminders add <title> [--at WHEN] [--list NAME] [--notes TEXT] [--priority N]
 apple-cli reminders complete <id>
+apple-cli reminders move <id> --at WHEN
 apple-cli reminders delete <id>                 CLI only
 apple-cli contacts list [--group NAME] [--limit N]
 apple-cli contacts search <name, email, or phone>
@@ -61,7 +62,7 @@ apple-cli calendar calendars | today
 apple-cli calendar agenda [--days N] [--from …] [--to …]
 apple-cli calendar search <query> [--since …] [--until …]
 apple-cli calendar add <title> [--start …] [--end … | --duration …] [--all-day] [--location …] [--alert …] [--calendar …]
-apple-cli calendar delete <id> [--all]          CLI only
+apple-cli calendar delete <id> [--all | --start WHEN]  CLI only
 apple-cli safari history | search <query> | domains | visited <url or domain> | bookmarks | tabs
 apple-cli mail mailboxes
 apple-cli mail list [--mailbox …] [--account …] [--since …] [--unread] [--flagged]

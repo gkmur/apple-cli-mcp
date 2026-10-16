@@ -1,7 +1,7 @@
 import Foundation
 import AppKit
 
-// Music: read-only. Library.musicdb is AES-encrypted with an undocumented record format that
+// Music: reads plus playback control and playlist adds. Library.musicdb is AES-encrypted with an undocumented record format that
 // changes between Music versions, so reads use Music's scripting dictionary instead, fetching
 // each property for every track in one bulk call (never a `whose` search).
 
@@ -82,12 +82,79 @@ private func musicCommands(_ ctx: Context) -> [Command] {
         Command(["music", "now"], .read, "Player state and the current track.", [launch]) { a in
             try MusicStore.now(launch: a.bool("launch"))
         },
+        Command(["music", "play"], .write, "Play a song, an album, an artist, or a playlist from your library, or resume with no arguments. Opens Music if needed.",
+                [Param("query", positional: true, "Song, album, or artist to find in your library"), Param("playlist", "Play this playlist instead")]) { a in
+            if let p = a.string("playlist"), try ctx.settings(MusicSettings.self).excludePlaylists.contains(where: { $0.lowercased() == p.lowercased() }) {
+                throw AppleError.hidden("playlist \(p)")
+            }
+            let out = try MusicStore.control("play", a.string("query") ?? "", a.string("playlist") ?? "")
+            Audit.write("music play", ["status": "ok"])
+            return Done(id: "music", action: out.isEmpty ? "playing" : "playing \(out)")
+        },
+        Command(["music", "control"], .write, "Pause, resume, skip, go back, or set the volume.",
+                [Param("action", required: true, positional: true, "pause, resume, next, previous, or volume"),
+                 Param("level", .integer, "Volume 0-100 (for volume)")]) { a in
+            let act = try a.require("action")
+            guard ["pause", "resume", "next", "previous", "volume"].contains(act) else { throw AppleError.invalid("action must be pause, resume, next, previous, or volume") }
+            if act == "volume", !(0...100).contains(a.int("level", -1)) { throw AppleError.invalid("volume needs --level 0-100") }
+            _ = try MusicStore.control(act, String(a.int("level", 0)), "")
+            return Done(id: "music", action: act)
+        },
+        Command(["music", "add-to-playlist"], .write, "Add the best library match for a song to one of your playlists.",
+                [Param("query", required: true, positional: true, "Song to find in your library"), Param("playlist", required: true, "Your playlist")]) { a in
+            let p = try a.require("playlist")
+            if try ctx.settings(MusicSettings.self).excludePlaylists.contains(where: { $0.lowercased() == p.lowercased() }) { throw AppleError.hidden("playlist \(p)") }
+            let out = try MusicStore.control("add", try a.require("query"), p)
+            Audit.write("music add-to-playlist", ["status": "ok"])
+            return Done(id: p, action: "added \(out)")
+        },
     ]
 }
 
 // MARK: - Store
 
 enum MusicStore {
+    /// Playback and playlist writes. Library lookups use Music's `search` command, never a `whose` scan.
+    static func control(_ action: String, _ arg: String, _ playlist: String) throws -> String {
+        try Osascript.run("""
+            on run argv
+                set {act, q, pl} to argv
+                tell application "Music"
+                    if act is "play" then
+                        if pl is not "" then
+                            play user playlist pl
+                            return pl
+                        else if q is not "" then
+                            set hits to search library playlist 1 for q
+                            if hits is {} then error "nothing in your library matches " & q
+                            play item 1 of hits
+                            return (name of item 1 of hits) & " - " & (artist of item 1 of hits)
+                        else
+                            play
+                            return ""
+                        end if
+                    else if act is "pause" then
+                        pause
+                    else if act is "resume" then
+                        play
+                    else if act is "next" then
+                        next track
+                    else if act is "previous" then
+                        previous track
+                    else if act is "volume" then
+                        set sound volume to (q as integer)
+                    else if act is "add" then
+                        set hits to search library playlist 1 for q only songs
+                        if hits is {} then error "nothing in your library matches " & q
+                        duplicate (item 1 of hits) to user playlist pl
+                        return (name of item 1 of hits) & " - " & (artist of item 1 of hits)
+                    end if
+                    return ""
+                end tell
+            end run
+            """, [action, arg, playlist], app: "Music", timeout: 30)
+    }
+
     static var isRunning: Bool { !NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.Music").isEmpty }
 
     /// Runs JXA that prints JSON. Refuses to start Music unless asked, since that opens a window.

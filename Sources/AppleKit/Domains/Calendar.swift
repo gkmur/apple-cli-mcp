@@ -66,6 +66,7 @@ struct EventInfo: Encodable {
     let alerts: [Int]          // minutes before start
     var created: Bool? = nil
     var deleted: Bool? = nil
+    var updated: Bool? = nil
 
     var line: String {
         let f = DateFormatter(); f.dateFormat = allDay ? "EEE yyyy-MM-dd" : "EEE yyyy-MM-dd HH:mm"
@@ -86,7 +87,7 @@ struct EventList: Output {
 
 struct EventResult: Output {
     let event: EventInfo
-    var text: String { (event.deleted == true ? "deleted " : "created ") + event.line + "  \(event.id)" }
+    var text: String { (event.deleted == true ? "deleted " : event.updated == true ? "updated " : "created ") + event.line + "  \(event.id)" }
 }
 
 // MARK: - Commands
@@ -138,9 +139,23 @@ private func calendarCommands(_ ctx: Context) -> [Command] {
                                                 duration: a.string("duration"), allDay: a.bool("all-day"), location: a.string("location"),
                                                 notes: a.string("notes"), alert: a.string("alert"), calendar: a.string("calendar")))
         },
-        Command(["calendar", "delete"], .destructive, "Delete an event. A repeating event needs all to delete every occurrence.",
-                [Param("id", required: true, positional: true, "Event ID"), Param("all", .boolean, "Delete every occurrence of a repeating event")]) { a in
-            EventResult(event: try await CalendarStore(ctx).delete(try a.require("id"), all: a.bool("all")))
+        Command(["calendar", "update"], .write, "Change an event: title, time, location, notes, alert, or calendar. For a repeating event, all changes this and every later occurrence.",
+                [Param("id", required: true, positional: true, "Event ID"), Param("title", "New title"),
+                 Param("start", "New start: YYYY-MM-DD HH:MM, today|tomorrow HH:MM, +2h"), Param("end", "New end (same forms)"),
+                 Param("duration", "New length like 30m or 1h, from the (new) start"), Param("location", "Location (empty string clears)"),
+                 Param("notes", "Notes (empty string clears)"), Param("alert", "Alert before start like 15m, or none"),
+                 Param("calendar", "Move to this calendar"), Param("all", .boolean, "For a repeating event, change this and future occurrences")]) { a in
+            let e = try await CalendarStore(ctx).update(try a.require("id"), title: a.string("title"), start: a.string("start"), end: a.string("end"),
+                                                       duration: a.string("duration"), location: a.raw["location"] as? String, notes: a.raw["notes"] as? String,
+                                                       alert: a.string("alert"), calendar: a.string("calendar"), future: a.bool("all"))
+            Audit.write("calendar update", ["id": e.id, "status": "ok"])
+            return EventResult(event: e)
+        },
+        Command(["calendar", "delete"], .destructive, "Delete an event. For a repeating event, pass start to delete one occurrence or all to delete every one.",
+                [Param("id", required: true, positional: true, "Event ID"), Param("all", .boolean, "Delete every occurrence of a repeating event"),
+                 Param("start", "Start of the one occurrence to delete: YYYY-MM-DD HH:MM")]) { a in
+            EventResult(event: try await CalendarStore(ctx).delete(try a.require("id"), all: a.bool("all"),
+                                                                   occurrence: try a.string("start").map { try parseWhen($0, defaultTime: "00:00") }))
         },
     ]
 }
@@ -265,9 +280,44 @@ final class CalendarStore {
         return i
     }
 
-    func delete(_ id: String, all: Bool) throws -> EventInfo {
+    func update(_ id: String, title: String?, start: String?, end: String?, duration: String?, location: String?, notes: String?,
+                alert: String?, calendar: String?, future: Bool) throws -> EventInfo {
         guard let e = store.event(withIdentifier: id), !hides(e) else { throw AppleError.notFound("event \(id)") }
-        if e.hasRecurrenceRules && !all { throw AppleError.refused("this event repeats. Pass all to delete every occurrence.") }
+        guard e.calendar.allowsContentModifications else { throw AppleError.refused("calendar \(e.calendar.title) is read-only") }
+        if let title {
+            if titleFilter.hidesTitle(title) { throw AppleError.refused("that title matches a privacy pattern, so the event would be hidden from you") }
+            e.title = title
+        }
+        let length = e.endDate.timeIntervalSince(e.startDate)
+        if let start { e.startDate = try parseWhen(start, defaultTime: "09:00"); e.endDate = e.startDate.addingTimeInterval(length) }
+        if let duration { e.endDate = e.startDate.addingTimeInterval(try parseDuration(duration)) }
+        if let end { e.endDate = try parseWhen(end, defaultTime: "10:00") }
+        guard e.endDate > e.startDate else { throw AppleError.invalid("end must be after start") }
+        if let location { e.location = location.isEmpty ? nil : location }
+        if let notes { e.notes = notes.isEmpty ? nil : notes }
+        if let alert { e.alarms = alert == "none" ? [] : [EKAlarm(relativeOffset: -(try parseDuration(alert)))] }
+        if let calendar {
+            guard let c = try calendars(named: calendar)?.first(where: \.allowsContentModifications) else { throw AppleError.refused("calendar \(calendar) is read-only or missing") }
+            e.calendar = c
+        }
+        try withDeadline(10, "saving the event") { try self.store.save(e, span: future ? .futureEvents : .thisEvent, commit: true) }
+        var i = info(e)
+        i.updated = true
+        return i
+    }
+
+    func delete(_ id: String, all: Bool, occurrence: Date? = nil) throws -> EventInfo {
+        guard let first = store.event(withIdentifier: id), !hides(first) else { throw AppleError.notFound("event \(id)") }
+        var e = first
+        if let occurrence {
+            if all { throw AppleError.invalid("pass start or all, not both") }
+            let match = try withDeadline(15, "reading events") {
+                self.store.events(matching: self.store.predicateForEvents(withStart: occurrence.addingTimeInterval(-60), end: occurrence.addingTimeInterval(60),
+                                                                          calendars: [first.calendar]))
+            }.first { $0.eventIdentifier == first.eventIdentifier && abs($0.startDate.timeIntervalSince(occurrence)) < 60 }
+            guard let match else { throw AppleError.notFound("an occurrence of \(id) starting \(localISO.string(from: occurrence))") }
+            e = match
+        } else if e.hasRecurrenceRules && !all { throw AppleError.refused("this event repeats. Pass start to delete one occurrence, or all to delete every one.") }
         var i = info(e)
         try withDeadline(10, "deleting the event") { try self.store.remove(e, span: all ? .futureEvents : .thisEvent, commit: true) }
         i.deleted = true

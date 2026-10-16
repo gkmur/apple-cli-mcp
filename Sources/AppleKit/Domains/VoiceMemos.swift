@@ -22,6 +22,9 @@ let voiceMemosDomain = Domain(name: "voicememos", defaults: VoiceMemosSettings.d
                       detail: "\(all.count) recordings readable, schema matches, \(Int(Date().timeIntervalSince(t) * 1000)) ms", fix: nil)]
     } catch {
         let e = AppleError.wrap(error)
+        if case .notFound(let what) = e, what.hasPrefix("database ") {
+            return [Check(domain: "voicememos", name: "store", ok: true, detail: "not set up on this Mac: Voice Memos has never synced here", fix: nil)]
+        }
         return [Check(domain: "voicememos", name: "store", ok: false, detail: e.description,
                       fix: e.code == "permission" ? "System Settings > Privacy & Security > Full Disk Access: turn on AppleCLI" : nil)]
     }

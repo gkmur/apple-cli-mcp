@@ -197,6 +197,21 @@ private func contactsCommands(_ ctx: Context) -> [Command] {[
         info.updated = true
         return info
     },
+    Command(["contacts", "group"], .write, "Add a contact to a group or take it out.",
+            [Param("id", required: true, positional: true, "Contact ID"), Param("add", "Group to add them to"), Param("remove", "Group to take them out of")]) { a in
+        let store = try ContactsStore(ctx)
+        let id = try a.require("id")
+        guard a.string("add") != nil || a.string("remove") != nil else { throw AppleError.invalid("pass add or remove") }
+        try store.setGroup(id, add: a.string("add"), remove: a.string("remove"))
+        Audit.write("contacts group", ["id": id, "status": "ok"])
+        return Done(id: id, action: [a.string("add").map { "added to \($0)" }, a.string("remove").map { "removed from \($0)" }].compactMap { $0 }.joined(separator: ", "))
+    },
+    Command(["contacts", "new-group"], .write, "Create a contact group in the default account.",
+            [Param("name", required: true, positional: true, "Group name")]) { a in
+        let id = try ContactsStore(ctx).newGroup(try a.require("name"))
+        Audit.write("contacts new-group", ["status": "ok"])
+        return Done(id: id, action: "created group \(try a.require("name"))")
+    },
     Command(["contacts", "delete"], .destructive, "Delete a contact from every account it is in.",
             [Param("id", required: true, positional: true, "Contact ID")]) { a in
         let id = try a.require("id")
@@ -446,6 +461,26 @@ final class ContactsStore {
         let req = CNSaveRequest()
         req.update(c)
         try withDeadline(10, "saving the contact") { try self.store.execute(req) }
+    }
+
+    func setGroup(_ id: String, add: String?, remove: String?) throws {
+        let c = try contact(id)
+        if hides(c) { throw AppleError.hidden("contact \(id)") }
+        let req = CNSaveRequest()
+        if let add { req.addMember(c, to: try group(named: add)) }
+        if let remove { req.removeMember(c, from: try group(named: remove)) }
+        try withDeadline(10, "saving the group") { try self.store.execute(req) }
+    }
+
+    func newGroup(_ name: String) throws -> String {
+        if hiddenGroups.contains(where: { $0.lowercased() == name.lowercased() }) { throw AppleError.refused("that group is hidden by your privacy config") }
+        if (try? group(named: name)) != nil { throw AppleError.invalid("a group named \(name) already exists") }
+        let g = CNMutableGroup()
+        g.name = name
+        let req = CNSaveRequest()
+        req.add(g, toContainerWithIdentifier: nil)
+        try withDeadline(10, "saving the group") { try self.store.execute(req) }
+        return g.identifier
     }
 
     func delete(_ id: String) throws {

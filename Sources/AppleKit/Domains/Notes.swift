@@ -152,6 +152,34 @@ private func notesCommands(_ ctx: Context) -> [Command] {[
         try NotesWriter.append(noteScriptID: n.scriptID(storeUUID: store.storeUUID), markdown: try a.require("text"))
         return NoteAck(id: n.id, appended: true)
     },
+    Command(["notes", "move"], .write, "Move a note to another folder.",
+            [Param("id", required: true, positional: true, "Note ID"), Param("folder", required: true, "Folder name")]) { a in
+        let store = try NotesStore(ctx)
+        let n = try store.find(try a.require("id"))
+        try NotesWriter.move(noteScriptID: n.scriptID(storeUUID: store.storeUUID), folderScriptID: try store.folderScriptID(named: try a.require("folder")))
+        Audit.write("notes move", ["id": n.id ?? "", "status": "ok"])
+        return Done(id: n.id ?? "", action: "moved to \(try a.require("folder"))")
+    },
+    Command(["notes", "rename"], .write, "Change a note's title (its first line).",
+            [Param("id", required: true, positional: true, "Note ID"), Param("title", required: true, "New title")]) { a in
+        let store = try NotesStore(ctx)
+        let n = try store.find(try a.require("id"))
+        let title = try a.require("title")
+        if store.privacy.hidesTitle(title) { throw AppleError.refused("that title matches a privacy pattern, so the note would be hidden from you") }
+        try NotesWriter.rename(noteScriptID: n.scriptID(storeUUID: store.storeUUID), title: title)
+        Audit.write("notes rename", ["id": n.id ?? "", "status": "ok"])
+        return Done(id: n.id ?? "", action: "renamed")
+    },
+    Command(["notes", "new-folder"], .write, "Create a folder in the default Notes account.",
+            [Param("name", required: true, positional: true, "Folder name")]) { a in
+        let store = try NotesStore(ctx)
+        let name = try a.require("name")
+        if store.privacy.hidesContainer(name) { throw AppleError.refused("that name matches a privacy rule, so the folder would be hidden from you") }
+        if (try? store.folderScriptID(named: name)) != nil { throw AppleError.invalid("a folder named \(name) already exists") }
+        let id = try NotesWriter.newFolder(name: name)
+        Audit.write("notes new-folder", ["status": "ok"])
+        return Done(id: id, action: "created folder \(name)")
+    },
     Command(["notes", "trash"], .destructive, "Move a note to Recently Deleted.",
             [Param("id", required: true, positional: true, "Note ID")]) { a in
         let store = try NotesStore(ctx)
@@ -608,6 +636,33 @@ public enum NotesWriter {
               end tell
             end run
             """, [noteScriptID, markdownToHTML(markdown)])
+    }
+
+    public static func move(noteScriptID: String, folderScriptID: String) throws {
+        _ = try run("""
+            on run argv
+              tell application "Notes" to move note id (item 1 of argv) to folder id (item 2 of argv)
+            end run
+            """, [noteScriptID, folderScriptID])
+    }
+
+    public static func rename(noteScriptID: String, title: String) throws {
+        _ = try run("""
+            on run argv
+              tell application "Notes" to set name of note id (item 1 of argv) to (item 2 of argv)
+            end run
+            """, [noteScriptID, title])
+    }
+
+    public static func newFolder(name: String) throws -> String {
+        try run("""
+            on run argv
+              tell application "Notes"
+                set f to make new folder at default account with properties {name:(item 1 of argv)}
+                return id of f
+              end tell
+            end run
+            """, [name])
     }
 
     /// Moves a note into the Recently Deleted folder. Notes keeps it there for 30 days.

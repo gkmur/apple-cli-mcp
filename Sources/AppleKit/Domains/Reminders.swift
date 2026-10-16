@@ -122,6 +122,40 @@ private func remindersCommands(_ ctx: Context) -> [Command] {[
         let r = try await RemindersWriter().complete(id)
         return ReminderAck(id: id, title: r.title, completed: true)
     },
+    Command(["reminders", "update"], .write, "Change a reminder's title, notes, priority, or list. Use move to change when it is due.",
+            [Param("id", required: true, positional: true, "Reminder ID"), Param("title", "New title"), Param("notes", "New notes (empty string clears)"),
+             Param("priority", .integer, "0 none, 1 high, 5 medium, 9 low"), Param("list", "Move to this list")]) { a in
+        let id = try a.require("id")
+        try RemindersStore(ctx).checkVisible(id)
+        let s = try ctx.settings(RemindersSettings.self)
+        if let l = a.string("list"), (s.excludeLists ?? []).contains(where: { $0.lowercased() == l.lowercased() }) { throw AppleError.hidden("list \(l)") }
+        let w = try await RemindersWriter()
+        let r = try w.update(id, title: a.string("title"), notes: a.raw["notes"] as? String, priority: a.intIfPresent("priority"), list: a.string("list"))
+        Audit.write("reminders update", ["id": id, "status": "ok"])
+        return Done(id: id, action: "updated \(r.title ?? "")")
+    },
+    Command(["reminders", "uncomplete"], .write, "Mark a completed reminder as not done.",
+            [Param("id", required: true, positional: true, "Reminder ID")]) { a in
+        let id = try a.require("id")
+        try RemindersStore(ctx).checkVisible(id)
+        let r = try await RemindersWriter().setCompleted(id, false)
+        Audit.write("reminders uncomplete", ["id": id, "status": "ok"])
+        return Done(id: id, action: "marked not done: \(r.title ?? "")")
+    },
+    Command(["reminders", "move"], .write, "Change when a reminder is due. The due date and its alarm both move.",
+            [Param("id", required: true, positional: true, "Reminder ID"),
+             Param("at", required: true, "When: YYYY-MM-DD [HH:MM], today|tomorrow [HH:MM], +30m/+2h/+1d")]) { a in
+        let id = try a.require("id")
+        try RemindersStore(ctx).checkVisible(id)
+        let at = try parseWhen(a.string("at"), defaultTime: try ctx.settings(RemindersSettings.self).defaultTime)
+        let r = try await RemindersWriter().move(id, to: at)
+        var info = try waitFor(3) { try RemindersStore(ctx).find(id).flatMap { $0.due == localISO.string(from: at) ? $0 : nil } }
+            ?? ReminderInfo(id: id, title: r.title ?? "", notes: r.notes, list: r.calendar.title, completed: r.isCompleted, completedAt: nil,
+                            due: localISO.string(from: at), allDay: false, flagged: false, priority: r.priority, parentId: nil,
+                            created: r.creationDate ?? Date(), synced: false)
+        info.remindAt = at
+        return info
+    },
     Command(["reminders", "delete"], .destructive, "Delete a reminder (it goes to Recently Deleted in Reminders).",
             [Param("id", required: true, positional: true, "Reminder ID")]) { a in
         let id = try a.require("id")
@@ -305,9 +339,37 @@ final class RemindersWriter {
         throw AppleError.notFound("reminder \(id)")
     }
 
+    func update(_ id: String, title: String?, notes: String?, priority: Int?, list: String?) throws -> EKReminder {
+        let r = try reminder(id)
+        if let title { r.title = title }
+        if let notes { r.notes = notes.isEmpty ? nil : notes }
+        if let priority { r.priority = priority }
+        if let list { r.calendar = try calendar(named: list) }
+        try withDeadline(10, "saving the reminder") { try self.store.save(r, commit: true) }
+        return r
+    }
+
+    func setCompleted(_ id: String, _ done: Bool) throws -> EKReminder {
+        let r = try reminder(id)
+        r.isCompleted = done
+        try withDeadline(10, "saving the reminder") { try self.store.save(r, commit: true) }
+        return r
+    }
+
     func complete(_ id: String) throws -> EKReminder {
         let r = try reminder(id)
         r.isCompleted = true
+        try withDeadline(10, "saving the reminder") { try self.store.save(r, commit: true) }
+        return r
+    }
+
+    /// Moves the due date and replaces the alarms with one at the new moment, the same shape add makes.
+    func move(_ id: String, to at: Date) throws -> EKReminder {
+        let r = try reminder(id)
+        var comps = Calendar.current.dateComponents([.year, .month, .day, .hour, .minute], from: at)
+        comps.timeZone = TimeZone.current
+        r.dueDateComponents = comps
+        r.alarms = [EKAlarm(absoluteDate: at)]
         try withDeadline(10, "saving the reminder") { try self.store.save(r, commit: true) }
         return r
     }

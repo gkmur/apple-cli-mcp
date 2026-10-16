@@ -169,6 +169,32 @@ private func mailCommands(_ ctx: Context) -> [Command] {
                                                            unread: true, flagged: false, body: false), limit: a.int("limit", 50)),
                             indexedThrough: try s.newest())
         },
+        Command(["mail", "draft"], .write, "Draft an email for review: new, reply, reply-all, or forward. Nothing is sent until `mail send <draft-id>`; it goes out exactly as shown.",
+                [Param("to", "Recipients, comma-separated (a reply fills these in)"), Param("cc", "Cc, comma-separated"), Param("bcc", "Bcc, comma-separated"),
+                 Param("subject", "Subject (a reply or forward fills it in)"), Param("body", required: true, "Body text"),
+                 Param("from", "Send from this address (default: Mail's default account)"),
+                 Param("attach", "Files to attach, comma-separated. Over MCP, files must be in ~/Downloads/apple-cli"),
+                 Param("reply-to", "Message ID to reply to"), Param("reply-all", .boolean, "Reply to everyone on the message"),
+                 Param("forward", "Message ID to forward")]) { a in
+            try MailWriter(ctx).draft(a)
+        },
+        Command(["mail", "send"], .write, "Send a drafted email exactly as drafted, then confirm it reached a Sent mailbox.",
+                [Param("draft", required: true, positional: true, "Draft ID from mail draft"),
+                 Param("save-only", .boolean, "Save it to Mail's Drafts mailbox (syncs to your phone) instead of sending")]) { a in
+            try MailWriter(ctx).send(try a.require("draft"), saveOnly: a.bool("save-only"))
+        },
+        Command(["mail", "modify"], .write, "Change messages: archive, trash (recoverable), move, read, unread, flag, unflag. Reads each back and reports what took.",
+                [Param("ids", required: true, positional: true, "Message IDs, space or comma separated"),
+                 Param("action", required: true, "archive, trash, move, read, unread, flag, or unflag"),
+                 Param("mailbox", "Target mailbox for move (path within the same account, e.g. Receipts)")]) { a in
+            let ids = try a.require("ids").split(whereSeparator: { $0 == "," || $0 == " " }).map(String.init)
+            return try MailWriter(ctx).modify(ids, action: try a.require("action"), mailbox: a.string("mailbox"))
+        },
+        Command(["mail", "attachments"], .write, "Save a message's attachments into a folder.",
+                [Param("id", required: true, positional: true, "Message ID"),
+                 Param("to", required: true, "Destination folder. Over MCP it is a folder name under ~/Downloads/apple-cli")]) { a in
+            try MailWriter(ctx).saveAttachments(try a.require("id"), to: try PhotosWriter.destination(try a.require("to"), agent: a.viaMCP))
+        },
         Command(["mail", "read"], .read, "Read one message: headers, recipients, attachments, and the body as plain text.",
                 [Param("id", required: true, positional: true, "Message ID from list or search"),
                  Param("max-chars", .integer, "Body length cap (default 20000)")]) { a in
@@ -623,5 +649,290 @@ struct MIMEText {
             .replacingOccurrences(of: "[ \t\u{00A0}\u{200C}\u{034F}]+\n", with: "\n", options: .regularExpression)
             .replacingOccurrences(of: #"\n{3,}"#, with: "\n\n", options: .regularExpression)
             .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+}
+
+// MARK: - Writing (Mail.app scripting, one message at a time by its Envelope Index ID)
+
+/// Envelope Index ROWIDs are the IDs Mail's scripting uses, so every reference below is direct:
+/// `message id N of mailbox "path" of account id "UUID"`, never a `whose` search, which hangs.
+struct MailChange: Encodable { let id: String; let ok: Bool; let detail: String }
+struct MailChanges: Output {
+    let action: String
+    let results: [MailChange]
+    var text: String { results.map { "\($0.ok ? "ok  " : "FAIL") \($0.id) \(action): \($0.detail)" }.joined(separator: "\n") }
+}
+struct SavedFiles: Output {
+    let folder: String
+    let saved: [String]
+    var text: String { saved.isEmpty ? "no attachments saved" : "saved \(saved.count) file(s) to \(folder): " + saved.joined(separator: ", ") }
+}
+
+/// Over MCP, outgoing attachments must already be in the agent folder, so an agent cannot mail out arbitrary files.
+func checkOutgoingFile(_ path: String, viaMCP: Bool) throws -> String {
+    let real = URL(fileURLWithPath: (path as NSString).expandingTildeInPath).resolvingSymlinksInPath().standardizedFileURL.path
+    guard FileManager.default.isReadableFile(atPath: real) else { throw AppleError.notFound("file \(path)") }
+    if viaMCP {
+        let root = URL(fileURLWithPath: PhotosWriter.agentRoot).resolvingSymlinksInPath().standardizedFileURL.path + "/"
+        guard real.hasPrefix(root) else { throw AppleError.refused("over MCP, attachments must be inside \(PhotosWriter.agentRoot)") }
+    }
+    return real
+}
+
+final class MailWriter {
+    let ctx: Context
+    let store: MailStore
+    init(_ ctx: Context) throws { self.ctx = ctx; store = try MailStore(ctx) }
+
+    /// Account UUID, mailbox path, and ROWID for a visible message. Hidden or missing messages throw.
+    func ref(_ id: String) throws -> (account: String, box: String, rowid: String, message: MailMessage) {
+        let m = try store.read(id, maxChars: 4000)
+        guard let n = Int(id), let boxID = try store.db.query("SELECT mailbox FROM messages WHERE ROWID = ?", [n]).first?.int("mailbox"),
+              let box = store.boxes[boxID] else { throw AppleError.notFound("mailbox of message \(id)") }
+        return (box.accountID, box.path, id, m)
+    }
+
+    func draft(_ a: Args) throws -> DraftOutput {
+        let list = { (k: String) in a.list(k) }
+        var to = list("to"), cc = list("cc")
+        let bcc = list("bcc"), body = try a.require("body")
+        var subject = a.string("subject") ?? ""
+        var mode = "new", refParts: [String] = []
+        var quoted: MailMessage?
+        if let rid = a.string("reply-to") ?? a.string("forward") {
+            let r = try ref(rid)
+            // Mail.app quotes or forwards the real message, so a message apple-cli masks (a one-time code,
+            // a sign-in or reset email) would leave with the very content the mask hides.
+            if r.message.body == "[one-time code hidden]" || r.message.preview == "[one-time code hidden]" {
+                throw AppleError.refused("message \(rid) is masked as a one-time code or sign-in email; it cannot be replied to or forwarded from apple-cli")
+            }
+            mode = a.string("forward") != nil ? "forward" : (a.bool("reply-all") ? "replyall" : "reply")
+            quoted = r.message
+            refParts = [r.account, r.box, r.rowid]
+            let base = r.message.subject.replacingOccurrences(of: #"^(?i)(re|fwd?):\s*"#, with: "", options: .regularExpression)
+            if subject.isEmpty { subject = (mode == "forward" ? "Fwd: " : "Re: ") + base }
+            if mode != "forward" && to.isEmpty { to = [r.message.fromAddress ?? r.message.from] }
+            if mode == "replyall" && cc.isEmpty { cc = (r.message.to + r.message.cc).filter { !$0.lowercased().contains((r.message.fromAddress ?? "~").lowercased()) } }
+        }
+        guard !to.isEmpty else { throw AppleError.invalid("no recipients; pass --to") }
+        // Items travel to the script one per line, so a line break inside one could smuggle in another.
+        for v in to + cc + bcc + list("attach") + [a.string("from") ?? "", subject] where v.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) {
+            throw AppleError.invalid("recipients, sender, subject, and attachment paths cannot contain line breaks or control characters")
+        }
+        let files = try list("attach").map { try checkOutgoingFile($0, viaMCP: a.viaMCP) }
+        let from = a.string("from") ?? ""
+        var lines = ["From: \(from.isEmpty ? "Mail's default account" : from)", "To: \(to.joined(separator: ", "))"]
+        if !cc.isEmpty { lines.append("Cc: \(cc.joined(separator: ", "))") }
+        if !bcc.isEmpty { lines.append("Bcc: \(bcc.joined(separator: ", "))") }
+        lines.append("Subject: \(subject)")
+        if mode != "new" { lines.append("\(mode == "forward" ? "Forwarding" : "Replying to") message \(refParts[2])") }
+        if !files.isEmpty { lines.append("Attachments: " + files.map { ($0 as NSString).lastPathComponent }.joined(separator: ", ")) }
+        lines.append(""); lines.append(body)
+        // What goes out also carries the original, so the review shows it.
+        if let q = quoted {
+            let excerpt = String((q.body ?? q.preview ?? "").prefix(1200))
+            lines.append("")
+            lines.append(mode == "forward" ? "--- Forwarded message (included in full) ---" : "--- Quoted original ---")
+            lines.append("From: \(q.from)  Subject: \(q.subject)")
+            if mode == "forward" && !q.attachments.isEmpty { lines.append("Forwarded attachments: \(q.attachments.joined(separator: ", "))") }
+            lines.append(excerpt + ((q.body ?? "").count > 1200 ? "\n[...]" : ""))
+        }
+        let d = try Draft.save(kind: "mail", summary: lines.joined(separator: "\n"),
+                               payload: ["mode": [mode], "ref": refParts, "from": [from], "to": to, "cc": cc, "bcc": bcc,
+                                         "subject": [subject], "body": [body], "attach": files])
+        Audit.write("mail draft", ["draft": d.id, "to": to.joined(separator: ", "), "mode": mode, "chars": body.count])
+        return DraftOutput(d, sendWith: "apple-cli mail send \(d.id)")
+    }
+
+    func send(_ id: String, saveOnly: Bool) throws -> SendResult {
+        saveOnly ? try sendNow(id, saveOnly: true) : try Audit.withSendSlot(ctx) { try sendNow(id, saveOnly: false) }
+    }
+
+    private func sendNow(_ id: String, saveOnly: Bool) throws -> SendResult {
+        let d = try Draft.take(id, kind: "mail")
+        let p = { (k: String) in d.payload[k] ?? [] }
+        let ref = p("ref") + ["", "", ""]
+        let script = """
+            on splitLines(t)
+                if t is "" then return {}
+                set AppleScript's text item delimiters to linefeed
+                set out to text items of t
+                set AppleScript's text item delimiters to ""
+                return out
+            end splitLines
+            on run argv
+                set {mode, acct, boxPath, rowid, fromAddr, toList, ccList, bccList, subj, bodyText, attachList, saveOnly} to argv
+                tell application "Mail"
+                    if mode is "new" then
+                        set msg to make new outgoing message with properties {subject:subj, content:bodyText, visible:false}
+                    else
+                        set orig to message id (rowid as integer) of mailbox boxPath of account id acct
+                        if mode is "forward" then
+                            set msg to forward orig opening window false
+                        else
+                            set msg to reply orig opening window false reply to all (mode is "replyall")
+                        end if
+                        set subject of msg to subj
+                        set content of msg to bodyText & return & return & (content of msg)
+                        delete every to recipient of msg
+                        delete every cc recipient of msg
+                    end if
+                    if fromAddr is not "" then
+                        set known to false
+                        repeat with a in accounts
+                            repeat with e in (email addresses of a)
+                                if (e as text) is fromAddr then set known to true
+                            end repeat
+                        end repeat
+                        if not known then error "no Mail account sends from " & fromAddr
+                        set sender of msg to fromAddr
+                    end if
+                    repeat with r in my splitLines(toList)
+                        make new to recipient at end of to recipients of msg with properties {address:(r as text)}
+                    end repeat
+                    repeat with r in my splitLines(ccList)
+                        make new cc recipient at end of cc recipients of msg with properties {address:(r as text)}
+                    end repeat
+                    repeat with r in my splitLines(bccList)
+                        make new bcc recipient at end of bcc recipients of msg with properties {address:(r as text)}
+                    end repeat
+                    repeat with f in my splitLines(attachList)
+                        tell content of msg to make new attachment with properties {file name:(POSIX file (f as text))} at after last paragraph
+                    end repeat
+                    if saveOnly is "1" then
+                        save msg
+                        close msg saving no
+                    else
+                        send msg
+                    end if
+                end tell
+            end run
+            """
+        let to = p("to").joined(separator: ", ")
+        let started = Date()
+        do {
+            _ = try Osascript.run(script, [p("mode").first ?? "new", ref[0], ref[1], ref[2], p("from").first ?? "",
+                                           p("to").joined(separator: "\n"), p("cc").joined(separator: "\n"), p("bcc").joined(separator: "\n"),
+                                           p("subject").first ?? "", p("body").first ?? "", p("attach").joined(separator: "\n"), saveOnly ? "1" : "0"],
+                                  app: "Mail", timeout: 90)
+        } catch {
+            Audit.write(saveOnly ? "mail save" : "mail send", ["draft": id, "to": to, "status": "failed", "error": AppleError.wrap(error).description])
+            throw error
+        }
+        if saveOnly {
+            Audit.write("mail save", ["draft": id, "to": to, "status": "saved"])
+            return SendResult(status: "saved", to: to, messageId: nil, detail: "in Mail's Drafts mailbox")
+        }
+        let result = confirmSent(subject: p("subject").first ?? "", since: started, to: to)
+        Audit.write("mail send", ["draft": id, "to": to, "status": result.status, "chars": (p("body").first ?? "").count])
+        return result
+    }
+
+    /// Mail files the sent copy into the account's Sent mailbox once the server takes it. Up to 45 seconds.
+    private func confirmSent(subject: String, since: Date, to: String) -> SendResult {
+        let deadline = Date().addingTimeInterval(45)
+        while Date() < deadline {
+            sleep(1)
+            guard let s = try? MailStore(ctx) else { continue }
+            let sent = s.boxes.values.filter { $0.path.lowercased().contains("sent") }.map(\.id)
+            guard !sent.isEmpty, let r = try? s.db.query("""
+                SELECT m.ROWID FROM messages m JOIN subjects su ON su.ROWID = m.subject
+                WHERE m.mailbox IN (\(sent.map(String.init).joined(separator: ","))) AND m.date_received >= ? AND su.subject = ?
+                ORDER BY m.ROWID DESC LIMIT 1
+                """, [Int(since.timeIntervalSince1970) - 120,
+                      subject.replacingOccurrences(of: #"^(?i)(re|fwd?):\s*"#, with: "", options: .regularExpression)]).first else { continue }
+            return SendResult(status: "sent", to: to, messageId: r.int("ROWID").map(String.init), detail: nil)
+        }
+        return SendResult(status: "sending", to: to, messageId: nil, detail: "Mail accepted it; no copy in a Sent mailbox within 45 s. Check Mail's Outbox if it stays missing")
+    }
+
+    func modify(_ ids: [String], action: String, mailbox: String?) throws -> MailChanges {
+        let actions = ["archive", "trash", "move", "read", "unread", "flag", "unflag"]
+        guard actions.contains(action) else { throw AppleError.invalid("action must be one of \(actions.joined(separator: ", "))") }
+        if action == "move" && (mailbox ?? "").isEmpty { throw AppleError.invalid("move needs --mailbox") }
+        var out: [MailChange] = []
+        for id in ids {
+            do {
+                let r = try ref(id)
+                var target = mailbox ?? ""
+                if action == "archive" {
+                    let paths = store.boxes.values.filter { $0.accountID == r.account }.map(\.path)
+                    guard let arch = ["Archive", "[Gmail]/All Mail", "Archives"].first(where: paths.contains) else {
+                        throw AppleError.notFound("an Archive mailbox in this account")
+                    }
+                    target = arch
+                }
+                if action == "move" || action == "archive" {
+                    guard store.boxes.values.contains(where: { $0.accountID == r.account && $0.path == target }) else {
+                        throw AppleError.notFound("mailbox \(target) in this account")
+                    }
+                }
+                _ = try Osascript.run("""
+                    on run argv
+                        set {act, acct, boxPath, rowid, dest} to argv
+                        tell application "Mail"
+                            set m to message id (rowid as integer) of mailbox boxPath of account id acct
+                            if act is "read" then set read status of m to true
+                            if act is "unread" then set read status of m to false
+                            if act is "flag" then set flagged status of m to true
+                            if act is "unflag" then set flagged status of m to false
+                            if act is "move" or act is "archive" then move m to mailbox dest of account id acct
+                            if act is "trash" then delete m
+                        end tell
+                    end run
+                    """, [action, r.account, r.box, r.rowid, target], app: "Mail", timeout: 30)
+                out.append(MailChange(id: id, ok: true, detail: verify(id, action: action, from: r.box)))
+                Audit.write("mail modify", ["id": id, "action": action, "mailbox": target, "status": "ok"])
+            } catch {
+                out.append(MailChange(id: id, ok: false, detail: AppleError.wrap(error).description))
+                Audit.write("mail modify", ["id": id, "action": action, "status": "failed"])
+            }
+        }
+        return MailChanges(action: action, results: out)
+    }
+
+    /// Reads the change back from Mail's index (it updates within a few seconds while Mail runs).
+    private func verify(_ id: String, action: String, from box: String) -> String {
+        for _ in 0..<10 {
+            usleep(500_000)
+            guard let s = try? MailStore(ctx), let n = Int(id) else { continue }
+            guard let r = try? s.db.query("SELECT read, flagged, deleted, mailbox FROM messages WHERE ROWID = ?", [n]).first else {
+                if ["move", "archive", "trash"].contains(action) { return "done (Mail gave it a new ID in the new mailbox)" }
+                continue
+            }
+            switch action {
+            case "read" where r.bool("read"), "unread" where !r.bool("read"), "flag" where r.bool("flagged"), "unflag" where !r.bool("flagged"):
+                return "done, confirmed in Mail's index"
+            case "move", "archive", "trash":
+                if r.bool("deleted") || s.boxes[r.int("mailbox") ?? -1]?.path != box { return "done, confirmed in Mail's index" }
+            default: break
+            }
+        }
+        return "sent to Mail; not yet visible in its index"
+    }
+
+    func saveAttachments(_ id: String, to dir: URL) throws -> SavedFiles {
+        let r = try ref(id)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let out = try Osascript.run("""
+            on run argv
+                set {acct, boxPath, rowid, dir} to argv
+                set saved to {}
+                tell application "Mail"
+                    set m to message id (rowid as integer) of mailbox boxPath of account id acct
+                    repeat with att in (mail attachments of m)
+                        set n to name of att
+                        if n does not start with "." and n does not contain "/" and n does not contain linefeed and n does not contain return and n does not contain ":" then
+                            save att in POSIX file (dir & "/" & n)
+                            set end of saved to n
+                        end if
+                    end repeat
+                end tell
+                set AppleScript's text item delimiters to linefeed
+                return saved as text
+            end run
+            """, [r.account, r.box, r.rowid, dir.path], app: "Mail", timeout: 120)
+        Audit.write("mail attachments", ["id": id, "folder": dir.path, "count": out.isEmpty ? 0 : out.split(separator: "\n").count])
+        return SavedFiles(folder: dir.path, saved: out.isEmpty ? [] : out.split(separator: "\n").map(String.init))
     }
 }

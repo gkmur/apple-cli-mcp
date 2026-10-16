@@ -10,8 +10,10 @@ import Foundation
 let acrossDomain = Domain(name: "across", defaults: nil, commands: acrossCommands, checks: { _ in [] })
 
 /// Runs one app's part of a combined command. A failure is recorded and the command carries on.
+/// An app whose store does not exist on this Mac (never set up or synced here) is skipped without an error.
 private func part<T>(_ app: String, _ errors: inout [String: String], _ body: () async throws -> T) async -> T? {
     do { return try await body() } catch {
+        if case .notFound(let what) = AppleError.wrap(error), what.hasPrefix("database ") { return nil }
         errors[app] = AppleError.wrap(error).description
         return nil
     }
@@ -308,7 +310,8 @@ private func permissions(request: Bool) async -> PermissionReport {
     let photos = (try? await PhotoAccess.check(request: request))?.status ?? "unknown"
     rows.append(row("photos", photos == "authorized" ? "granted" : photos == "not_determined" ? "not_asked" : photos, pane: "Photos"))
 
-    for (name, id) in [("automation: Notes", "com.apple.Notes"), ("automation: Music", "com.apple.Music")] {
+    for (name, id) in [("automation: Notes", "com.apple.Notes"), ("automation: Music", "com.apple.Music"), ("automation: Messages", "com.apple.MobileSMS"),
+                       ("automation: Mail", "com.apple.mail"), ("automation: Safari", "com.apple.Safari")] {
         rows.append(row(name, automation(id, request: request), pane: "Automation"))
     }
     return PermissionReport(app: bundle, permissions: rows)

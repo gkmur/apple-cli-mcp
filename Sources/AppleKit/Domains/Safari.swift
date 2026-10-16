@@ -90,6 +90,25 @@ private func safariCommands(_ ctx: Context) -> [Command] {
                                                           since: try a.string("since").map(parseSince) ?? Date().addingTimeInterval(-86400),
                                                           limit: a.int("limit", 50)))
         },
+        Command(["safari", "read-later"], .write, "Add a page to Safari's Reading List (syncs to your other devices). Safari has no supported way to add bookmarks, so there is no bookmark command.",
+                [Param("url", required: true, positional: true, "Page URL (http or https)"), Param("title", "Title to show")]) { a in
+            let url = try a.require("url")
+            guard let u = URL(string: url), ["http", "https"].contains(u.scheme?.lowercased() ?? "") else { throw AppleError.invalid("url must start with http:// or https://") }
+            _ = try Osascript.run("""
+                on run argv
+                    set {u, t} to argv
+                    tell application "Safari"
+                        if t is "" then
+                            add reading list item u
+                        else
+                            add reading list item u with title t
+                        end if
+                    end tell
+                end run
+                """, [url, a.string("title") ?? ""], app: "Safari", timeout: 30)
+            Audit.write("safari read-later", ["status": "ok", "domain": u.host ?? ""])
+            return Done(id: url, action: "added to Reading List")
+        },
         Command(["safari", "search"], .read, "Search visited page titles and URLs, newest first.",
                 [Param("query", required: true, positional: true, "Text to find"), Param("since", "Default 90d"), domain,
                  Param("limit", .integer, "Max (default 30)")]) { a in
