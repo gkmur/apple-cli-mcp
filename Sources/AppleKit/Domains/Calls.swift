@@ -25,7 +25,7 @@ let callsDomain = Domain(name: "calls", defaults: CallsSettings.defaults, comman
     } catch {
         let e = AppleError.wrap(error)
         return [Check(domain: "calls", name: "store", ok: false, detail: e.description,
-                      fix: e.code == "permission" ? "System Settings > Privacy & Security > Full Disk Access" : nil)]
+                      fix: e.code == "permission" ? "System Settings > Privacy & Security > Full Disk Access: turn on AppleCLI" : nil)]
     }
 })
 

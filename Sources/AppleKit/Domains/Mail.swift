@@ -33,19 +33,19 @@ let mailDomain = Domain(name: "mail", defaults: MailSettings.defaults, commands:
         let s = try MailStore(ctx)
         let n = try s.db.query("SELECT COUNT(*) AS N, MAX(date_received) AS Z FROM messages WHERE deleted = 0").first
         let newest = n?.int("Z").map { Date(timeIntervalSince1970: Double($0)) }
-        let age = newest.map { Date().timeIntervalSince($0) / 86400 } ?? 999
         return [
             Check(domain: "mail", name: "store", ok: true,
                   detail: "\(n?.int("N") ?? 0) messages readable, schema matches, \(Int(Date().timeIntervalSince(t) * 1000)) ms", fix: nil),
             // An old index is information, not a failure: the user may read mail elsewhere.
             Check(domain: "mail", name: "freshness", ok: true,
-                  detail: "newest message \(newest.map { localISO.string(from: $0) } ?? "none"). The index is only as fresh as Mail.app's last sync",
-                  fix: age < 7 ? nil : "Open Mail so it syncs"),
+                  detail: "newest message \(newest.map { localISO.string(from: $0) } ?? "none"). "
+                      + (mailStaleWarning(newest) ?? "The index is only as fresh as Mail.app's last sync"),
+                  fix: mailStaleWarning(newest) == nil ? nil : "Open Mail so it syncs"),
         ]
     } catch {
         let e = AppleError.wrap(error)
         return [Check(domain: "mail", name: "store", ok: false, detail: e.description,
-                      fix: e.code == "permission" ? "System Settings > Privacy & Security > Full Disk Access" : nil)]
+                      fix: e.code == "permission" ? "System Settings > Privacy & Security > Full Disk Access: turn on AppleCLI" : nil)]
     }
 })
 
@@ -79,10 +79,26 @@ struct MailList: Output {
     let messages: [MailSummary]
     /// Newest message in the index. Mail's index only updates while Mail.app runs.
     let indexedThrough: Date?
+    /// Set when the index is over a day old, so a reader knows newer mail may be missing.
+    let warning: String?
+
+    init(messages: [MailSummary], indexedThrough: Date?) {
+        self.messages = messages
+        self.indexedThrough = indexedThrough
+        warning = mailStaleWarning(indexedThrough)
+    }
     var text: String {
         (messages.isEmpty ? "no messages" : messages.map(\.line).joined(separator: "\n"))
             + "\n(index current through \(indexedThrough.map { localISO.string(from: $0) } ?? "unknown"))"
+            + (warning.map { "\nwarning: \($0)" } ?? "")
     }
+}
+
+/// Mail.app writes its index only while it runs. Nil when the newest message is under a day old.
+func mailStaleWarning(_ newest: Date?) -> String? {
+    guard let newest, Date().timeIntervalSince(newest) > 86400 else { return nil }
+    let hours = Int(Date().timeIntervalSince(newest) / 3600)
+    return "Mail.app has not synced for \(hours / 24)d \(hours % 24)h, so newer mail is missing. Open Mail.app on this Mac to catch up."
 }
 
 struct MailMessage: Output {

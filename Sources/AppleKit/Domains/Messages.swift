@@ -44,7 +44,7 @@ let messagesDomain = Domain(name: "messages", defaults: MessagesSettings.default
     } catch {
         let e = AppleError.wrap(error)
         return [Check(domain: "messages", name: "store", ok: false, detail: e.description,
-                      fix: e.code == "permission" ? "System Settings > Privacy & Security > Full Disk Access" : nil)]
+                      fix: e.code == "permission" ? "System Settings > Privacy & Security > Full Disk Access: turn on AppleCLI" : nil)]
     }
 })
 

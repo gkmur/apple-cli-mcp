@@ -19,7 +19,7 @@ public final class SQLiteReader {
             throw AppleError.notFound("database \(path)")
         }
         if !FileManager.default.isReadableFile(atPath: path) {
-            throw AppleError.permission("cannot read \(path). Give the terminal or app running apple-cli Full Disk Access in System Settings > Privacy & Security")
+            throw Self.noAccess(path)
         }
         do {
             try open(path)
@@ -30,8 +30,15 @@ public final class SQLiteReader {
             guard allowCopy else {
                 throw AppleError.database("\((path as NSString).lastPathComponent) is locked and too large to copy. Try again in a moment.")
             }
-            try openCopy()
+            do { try openCopy() } catch let e as NSError where e.code == NSFileReadNoPermissionError || e.code == 513 {
+                throw Self.noAccess(path)
+            }
         }
+    }
+
+    static func noAccess(_ path: String) -> AppleError {
+        .permission("cannot read \(path). Give AppleCLI Full Disk Access: System Settings > Privacy & Security > Full Disk Access, "
+                    + "add ~/Applications/AppleCLI.app, and turn it on. `apple-cli permissions --request` opens the pane")
     }
 
     deinit { close() }

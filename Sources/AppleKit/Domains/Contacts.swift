@@ -247,7 +247,7 @@ private func localizedLabel(_ l: String) -> String {
     return v
 }
 
-private func contactInfo(_ c: CNContact) -> ContactInfo {
+func contactInfo(_ c: CNContact) -> ContactInfo {
     func label(_ l: String?) -> String? { l.map(localizedLabel) }
     func opt(_ s: String) -> String? { s.isEmpty ? nil : s }
     // List and search fetch fewer keys. Reading a key that was not fetched raises, so check first.

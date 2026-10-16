@@ -136,7 +136,7 @@ Every writer returns the new item's stable ID, so a read can follow immediately.
 
 This becomes the first thing an agent runs when a command fails.
 
-Most permissions belong to the app that launched apple-cli (Claude, Terminal). Photos is the exception. A launcher without a Photos usage string gets no prompt, and macOS kills the process. So `photos download`, `photos delete`, and `photos access` rerun in a child that disclaims its launcher (`OwnApp` in `Runtime.swift`), and macOS records the grant for the signed bundle `~/Applications/AppleCLI.app`. `Support/install.sh` builds and signs that bundle.
+macOS gives a process the permissions of the app that launched it, so the same command used to read Messages under Claude and fail under launchd or SSH. Now `CLI.main` reruns every invocation in a child that disclaims its launcher (`OwnApp` in `Runtime.swift`), and every grant belongs to the signed bundle `~/Applications/AppleCLI.app`. The child gets only an allowlisted environment, and the hardened runtime makes dyld ignore `DYLD_*`, so no caller can run its own code under AppleCLI's grants. `apple-cli permissions --request` asks for everything; `Support/install.sh` builds and signs the bundle.
 
 ### Testing
 
@@ -166,7 +166,7 @@ The single `scripts/e2e.py` becomes a runner with one module per domain (`script
 - **A long-running MCP process cache.** If agents call `contacts search` in tight loops, keep the `CNContactStore` warm in the MCP process (the CLI stays stateless).
 - **Write queue or offline retry.** Only needed if a sync check starts timing out regularly.
 - **Calendar and Messages read backends**, decided in their teardowns.
-- **Moving every permission to AppleCLI** (Full Disk Access, Contacts, Calendars, Reminders) so it works the same from any launcher. Today only Photos is, because only Photos fails under Claude.
+- **Keeping the mini's copies fresh.** The mini reads its own iCloud copies, which are only as current as its apps' last sync. Notes, Safari, and call history there lagged weeks behind on 2026-10-16.
 
 ## 7. Migration from v0.1
 

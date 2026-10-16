@@ -13,7 +13,15 @@ Fast access for agents to Apple Notes, Reminders, Contacts, Calendar, Photos, Me
 Support/install.sh
 ```
 
-This builds apple-cli, wraps it in `~/Applications/AppleCLI.app`, signs it with your Apple Development certificate, and links `~/.local/bin/apple-cli` to it. Photos download and delete run as AppleCLI, so macOS asks for Photos access in AppleCLI's name. Run `apple-cli photos access --request` to show that prompt.
+This builds apple-cli, wraps it in `~/Applications/AppleCLI.app`, signs it with your Apple Development certificate, and links `~/.local/bin/apple-cli` to it.
+
+Every command runs as AppleCLI, whatever launched it (Claude, Terminal, launchd, SSH). So macOS permissions belong to AppleCLI, and one set of grants works everywhere on that Mac. After the first install:
+
+```bash
+apple-cli permissions --request
+```
+
+This shows each prompt not yet answered (Contacts, Calendars, Reminders, Photos, control of Notes and Music). It also opens the Full Disk Access pane with AppleCLI.app selected in Finder; drag it into the list and switch it on. Run it from a logged-in session, because prompts cannot show over SSH. The grants are tied to the signing certificate, so rebuilds keep them.
 
 ## Commands
 
@@ -66,8 +74,17 @@ apple-cli shortcuts run <name or id> [--input TEXT]   CLI only
 apple-cli calls recent | missed [--since …] [--no-names]
 apple-cli calls with <name, phone, or email>
 apple-cli music recent | top | search <query> | playlists | now   [--launch]
+apple-cli person <name, contact ID, phone, or email> [--limit N]
+                                                contact card, texts, mail from them, calls, shared events, last contact
+apple-cli today                                 calendar, reminders due, unread texts, missed calls, unread mail
+apple-cli search <query> [--apps messages,mail,notes,safari,voicememos] [--limit N]
+                                                one search across apps, newest first
+apple-cli photos access [--request]             whether AppleCLI has Photos full access
+apple-cli permissions [--request]               every macOS permission AppleCLI holds
 apple-cli doctor                                permissions, store files, schema, speed per app
 apple-cli mcp                                   MCP server on stdio
+apple-cli serve --host IP [--port 7790] [--token-file PATH] [--writes]
+                                                MCP server over HTTP, bearer token, read-only by default
 ```
 
 `--at` takes `YYYY-MM-DD [HH:MM]`, `today|tomorrow [HH:MM]`, or `+30m`, `+2h`, `+1d`. With no `--at`, the reminder is set for tomorrow at the default time. Every reminder gets a due date and an alarm at that moment, so it always pings.
@@ -84,9 +101,11 @@ The MCP server exposes the same commands as tools (`notes_search`, `contacts_rea
 - `messages read` takes a chat ID, a group name, a contact name, a phone number, or an email. `--since` and `--before` take `YYYY-MM-DD [HH:MM]`, `today`, `yesterday`, or `7d`/`12h`/`30m` ago.
 - Messages is read-only. Reactions fold into the message they react to. Attachments come back with their file path.
 - `calendar add` defaults to the one writable calendar whose source is iCloud. `--alert` replaces the calendar's default alerts.
-- Mail's index only updates while Mail.app runs, so every Mail listing reports `indexedThrough`. Bodies come from Mail's `.emlx` files; `bodyAvailable` is false when Mail has not downloaded one.
+- Mail's index only updates while Mail.app runs, so every Mail listing reports `indexedThrough`, plus a `warning` once it is over a day old. Bodies come from Mail's `.emlx` files; `bodyAvailable` is false when Mail has not downloaded one.
 - `shortcuts read` lists action identifiers only, never parameters, which can hold URLs and tokens.
 - Voice Memos transcripts come from inside each `.m4a`, split into timed sentences.
+- `person`, `today`, and `search` read each app separately. If one app fails (a missing permission, say), the rest still come back and the failure is listed under `errors`.
+- `person` matches calendar attendees by full name or email, so a first name alone never pulls in someone else's meetings.
 - Music reads go through Music's scripting dictionary in bulk (about 0.3 s for the whole library). Commands refuse while Music is closed unless you pass `--launch`, since scripting opens it.
 
 ## Privacy

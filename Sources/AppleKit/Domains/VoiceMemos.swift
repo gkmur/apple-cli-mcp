@@ -23,7 +23,7 @@ let voiceMemosDomain = Domain(name: "voicememos", defaults: VoiceMemosSettings.d
     } catch {
         let e = AppleError.wrap(error)
         return [Check(domain: "voicememos", name: "store", ok: false, detail: e.description,
-                      fix: e.code == "permission" ? "System Settings > Privacy & Security > Full Disk Access" : nil)]
+                      fix: e.code == "permission" ? "System Settings > Privacy & Security > Full Disk Access: turn on AppleCLI" : nil)]
     }
 })
 

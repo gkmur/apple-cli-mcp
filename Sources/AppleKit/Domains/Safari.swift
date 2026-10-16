@@ -25,7 +25,7 @@ let safariDomain = Domain(name: "safari", defaults: SafariSettings.defaults, com
     } catch {
         let e = AppleError.wrap(error)
         return [Check(domain: "safari", name: "history", ok: false, detail: e.description,
-                      fix: e.code == "permission" ? "System Settings > Privacy & Security > Full Disk Access" : nil)]
+                      fix: e.code == "permission" ? "System Settings > Privacy & Security > Full Disk Access: turn on AppleCLI" : nil)]
     }
 })
 

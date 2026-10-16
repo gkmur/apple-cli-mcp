@@ -32,7 +32,7 @@ let photosDomain = Domain(name: "photos", defaults: PhotosSettings.defaults, com
     } catch {
         let e = AppleError.wrap(error)
         out.append(Check(domain: "photos", name: "library", ok: false, detail: e.description,
-                         fix: e.code == "permission" ? "System Settings > Privacy & Security > Full Disk Access" : nil))
+                         fix: e.code == "permission" ? "System Settings > Privacy & Security > Full Disk Access: turn on AppleCLI" : nil))
     }
     do {
         let a = try await PhotoAccess.check(request: false)
@@ -103,7 +103,7 @@ struct AlbumList: Output {
     var text: String { albums.map { "\($0.name)  (\($0.items))" }.joined(separator: "\n") }
 }
 
-struct DownloadResult: Output, Decodable {
+struct DownloadResult: Output {
     let folder: String
     let saved: [String]
     let skipped: [String]
@@ -115,7 +115,7 @@ struct DownloadResult: Output, Decodable {
     }
 }
 
-struct DeleteResult: Output, Decodable {
+struct DeleteResult: Output {
     let deleted: [String]
     var text: String { "moved \(deleted.count) item(s) to Recently Deleted" }
 }
@@ -163,9 +163,6 @@ private func photosCommands(_ ctx: Context) -> [Command] {
             // Privacy check first: a hidden or missing ID fails before PhotoKit is ever asked for access.
             let items = try PhotosStore(ctx).resolve(ids)
             let to = try PhotosWriter.destination(try a.require("to"), agent: a.viaMCP)
-            if !OwnApp.active {
-                return try await OwnApp.run(["photos", "download", items.map(\.id).joined(separator: ","), "--to", to.path], as: DownloadResult.self)
-            }
             let floor = try ctx.settings(PhotosSettings.self).minFreeGBAfterDownload
             return try await PhotosWriter().download(items, to: to, minFreeGB: floor)
         },
@@ -173,7 +170,6 @@ private func photosCommands(_ ctx: Context) -> [Command] {
                 [Param("ids", required: true, positional: true, "Item IDs, space or comma separated")]) { a in
             let ids = try a.require("ids").split(whereSeparator: { $0 == "," || $0 == " " }).map(String.init)
             let items = try PhotosStore(ctx).resolve(ids)
-            if !OwnApp.active { return try await OwnApp.run(["photos", "delete", items.map(\.id).joined(separator: ",")], as: DeleteResult.self) }
             FileHandle.standardError.write(Data(("About to move to Recently Deleted:\n" + items.map { "  " + $0.line }.joined(separator: "\n")
                                                  + "\nmacOS will ask you to confirm.\n").utf8))
             return DeleteResult(deleted: try await PhotosWriter().delete(items))
@@ -351,9 +347,8 @@ final class PhotosStore {
 
 // MARK: - Access
 
-/// Photos access belongs to apple-cli's own app identity, so a process started by another app
-/// asks a child running as AppleCLI (see OwnApp).
-struct PhotoAccess: Output, Decodable {
+/// Photos access belongs to apple-cli's own app identity (see OwnApp).
+struct PhotoAccess: Output {
     let status: String
     var text: String {
         switch status {
@@ -364,7 +359,6 @@ struct PhotoAccess: Output, Decodable {
     }
 
     static func check(request: Bool) async throws -> PhotoAccess {
-        guard OwnApp.active else { return try await OwnApp.run(["photos", "access"] + (request ? ["--request"] : []), as: PhotoAccess.self) }
         var st = PHPhotoLibrary.authorizationStatus(for: .readWrite)
         if request && st == .notDetermined { st = await PHPhotoLibrary.requestAuthorization(for: .readWrite) }
         switch st {

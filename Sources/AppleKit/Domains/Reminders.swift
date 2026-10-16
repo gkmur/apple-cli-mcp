@@ -28,7 +28,7 @@ let remindersDomain = Domain(name: "reminders", defaults: RemindersSettings.defa
     } catch {
         let e = AppleError.wrap(error)
         out.append(Check(domain: "reminders", name: "stores", ok: false, detail: e.description,
-                         fix: e.code == "permission" ? "System Settings > Privacy & Security > Full Disk Access" : nil))
+                         fix: e.code == "permission" ? "System Settings > Privacy & Security > Full Disk Access: turn on AppleCLI" : nil))
     }
     let status = EKEventStore.authorizationStatus(for: .reminder)
     let ok = status == .fullAccess

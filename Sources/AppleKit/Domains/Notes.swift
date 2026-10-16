@@ -34,7 +34,7 @@ let notesDomain = Domain(name: "notes", defaults: NotesSettings.defaults, comman
     } catch {
         let e = AppleError.wrap(error)
         out.append(Check(domain: "notes", name: "store", ok: false, detail: e.description,
-                         fix: e.code == "permission" ? "System Settings > Privacy & Security > Full Disk Access" : nil))
+                         fix: e.code == "permission" ? "System Settings > Privacy & Security > Full Disk Access: turn on AppleCLI" : nil))
     }
     out.append(Check(domain: "notes", name: "automation", ok: true,
                      detail: "Notes.app control is checked on the first write. A denial returns code permission.", fix: nil))
@@ -112,21 +112,7 @@ private func notesCommands(_ ctx: Context) -> [Command] {[
     },
     Command(["notes", "search"], .read, "Search note titles and bodies (case-insensitive).",
             [Param("query", required: true, positional: true, "Text to find"), Param("limit", .integer, "Max results (default 20)")]) { a in
-        let q = try a.require("query")
-        let store = try NotesStore(ctx)
-        let (notes, hidden) = try store.allNotes()
-        var out: [NoteInfo] = []
-        for n in notes {
-            let hay = (n.title ?? "") + "\n" + (store.plainText(n) ?? "")
-            guard let r = hay.range(of: q, options: [.caseInsensitive, .diacriticInsensitive]) else { continue }
-            let lo = hay.index(r.lowerBound, offsetBy: -60, limitedBy: hay.startIndex) ?? hay.startIndex
-            let hi = hay.index(r.upperBound, offsetBy: 80, limitedBy: hay.endIndex) ?? hay.endIndex
-            var m = n.info()
-            m.match = hay[lo..<hi].replacingOccurrences(of: "\n", with: " ")
-            out.append(m)
-            if out.count >= a.int("limit", 20) { break }
-        }
-        return NoteSearch(results: out, hidden: hidden)
+        try searchNotes(ctx, try a.require("query"), limit: a.int("limit", 20))
     },
     Command(["notes", "read"], .read, "Read one note as Markdown.",
             [Param("id", required: true, positional: true, "Note ID from list/search")]) { a in
@@ -174,6 +160,24 @@ private func notesCommands(_ ctx: Context) -> [Command] {[
         return NoteAck(id: n.id, trashed: true)
     },
 ]}
+
+/// Title and body search with a short excerpt around the first match. Also used by `apple-cli search`.
+func searchNotes(_ ctx: Context, _ q: String, limit: Int) throws -> NoteSearch {
+    let store = try NotesStore(ctx)
+    let (notes, hidden) = try store.allNotes()
+    var out: [NoteInfo] = []
+    for n in notes {
+        let hay = (n.title ?? "") + "\n" + (store.plainText(n) ?? "")
+        guard let r = hay.range(of: q, options: [.caseInsensitive, .diacriticInsensitive]) else { continue }
+        let lo = hay.index(r.lowerBound, offsetBy: -60, limitedBy: hay.startIndex) ?? hay.startIndex
+        let hi = hay.index(r.upperBound, offsetBy: 80, limitedBy: hay.endIndex) ?? hay.endIndex
+        var m = n.info()
+        m.match = hay[lo..<hi].replacingOccurrences(of: "\n", with: " ")
+        out.append(m)
+        if out.count >= limit { break }
+    }
+    return NoteSearch(results: out, hidden: hidden)
+}
 
 // MARK: - Fast read path (NoteStore.sqlite, read-only)
 

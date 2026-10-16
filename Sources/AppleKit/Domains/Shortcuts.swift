@@ -22,7 +22,7 @@ let shortcutsDomain = Domain(name: "shortcuts", defaults: ShortcutsSettings.defa
     } catch {
         let e = AppleError.wrap(error)
         return [Check(domain: "shortcuts", name: "store", ok: false, detail: e.description,
-                      fix: e.code == "permission" ? "System Settings > Privacy & Security > Full Disk Access" : nil)]
+                      fix: e.code == "permission" ? "System Settings > Privacy & Security > Full Disk Access: turn on AppleCLI" : nil)]
     }
 })
 
