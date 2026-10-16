@@ -15,6 +15,8 @@ rm -rf "$app"
 mkdir -p "$app/Contents/MacOS"
 cp Support/Info.plist "$app/Contents/Info.plist"
 cp .build/release/apple-cli "$app/Contents/MacOS/apple-cli"
+# The icon Finder, System Settings, and permission prompts show for AppleCLI.
+if [ -f Support/AppIcon.icns ]; then mkdir -p "$app/Contents/Resources"; cp Support/AppIcon.icns "$app/Contents/Resources/AppIcon.icns"; fi
 
 # An Apple Development certificate keeps the identity stable. Ad hoc (-) works, but every rebuild asks again.
 identity=$(security find-identity -v -p codesigning | awk -F'"' '/Apple Development|Developer ID Application/ { print $2; exit }')

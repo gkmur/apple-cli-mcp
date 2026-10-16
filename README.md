@@ -105,7 +105,7 @@ apple-cli photos access [--request]             whether AppleCLI has Photos full
 apple-cli permissions [--request]               every macOS permission AppleCLI holds
 apple-cli doctor                                permissions, store files, schema, speed per app
 apple-cli mcp                                   MCP server on stdio
-apple-cli serve --host IP [--port 7790] [--token-file PATH] [--writes]
+apple-cli serve --host IP [--port 7790] [--token-file PATH] [--writes] [--access-port 7791 --access-team TEAM --access-aud TAG]
                                                 MCP server over HTTP, bearer token, read-only by default
 ```
 

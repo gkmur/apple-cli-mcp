@@ -1,12 +1,13 @@
 import Foundation
 import Network
+import Security
 
 // One registry drives the CLI, `--json`, and the MCP server, so they cannot drift.
 
 /// Every app apple-cli knows. Adding an app = one folder under Domains/ plus one line here.
 let allDomains: [Domain] = [notesDomain, remindersDomain, contactsDomain, messagesDomain, photosDomain, calendarDomain, safariDomain, mailDomain, voiceMemosDomain, shortcutsDomain, callsDomain, musicDomain, acrossDomain]
 
-public let version = "0.14.0"
+public let version = "0.15.0"
 
 final class Registry {
     let context: Context
@@ -136,7 +137,7 @@ public enum CLI {
 
     static func usage(_ cmds: [Command]) -> String {
         var s = "apple-cli \(version): fast Apple app access for agents\n\nUsage: apple-cli <app> <command> [args] [--json]\n       apple-cli mcp   (MCP server on stdio)\n"
-            + "       apple-cli serve --host <ip> [--port 7790] [--token-file …] [--writes]   (MCP server over HTTP, bearer token, read-only unless --writes)\n\n"
+            + "       apple-cli serve --host <ip> [--port 7790] [--token-file …] [--writes] [--access-port 7791 --access-team <team> --access-aud <tag>]   (MCP server over HTTP, bearer token or Cloudflare Access, read-only unless --writes)\n\n"
         for c in cmds {
             let args = c.params.map { $0.positional ? "<\($0.name)>" : "[--\($0.name)\($0.kind == .boolean ? "" : " …")]" }.joined(separator: " ")
             let tag = c.effect == .destructive ? "  (CLI only)" : ""
@@ -151,10 +152,20 @@ public enum CLI {
 final class MCPServer {
     let registry: Registry
     /// Destructive commands are never tools. Without writes (the HTTP default), only reads are.
-    var tools: [Command] { tools(deletes: false) }
+    var tools: [Command] { tools(for: .agent) }
+    /// The two commands that send as the user. Callers with a service token (cloud sessions) get drafts only.
+    static let sendTools: Set<String> = ["mail_send", "messages_send"]
     /// Deletes are offered only to the MacBook's router (it holds the CLI token), never to agents.
-    func tools(deletes: Bool) -> [Command] {
-        registry.commands.filter { $0.effect == .read || (allowWrites && ($0.effect == .write || deletes)) }
+    func tools(for caller: Caller) -> [Command] {
+        registry.commands.filter { c in
+            switch c.effect {
+            case .read: return true
+            case .write:
+                if case .service = caller, Self.sendTools.contains(c.toolName) { return false }
+                return allowWrites
+            case .destructive: return allowWrites && caller == .cli
+            }
+        }
     }
     let allowWrites: Bool
     init(registry: Registry, allowWrites: Bool = true) { self.registry = registry; self.allowWrites = allowWrites }
@@ -169,7 +180,7 @@ final class MCPServer {
     }
 
     /// Answers one JSON-RPC message. Nil for notifications and anything unparseable, which get no reply.
-    func handle(_ body: Data, deletes: Bool = false) async -> Data? {
+    func handle(_ body: Data, caller: Caller = .agent) async -> Data? {
         guard let msg = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
               let method = msg["method"] as? String, let id = msg["id"] else { return nil }
         let params = msg["params"] as? [String: Any] ?? [:]
@@ -180,10 +191,10 @@ final class MCPServer {
                                "capabilities": ["tools": [:]],
                                "serverInfo": ["name": "apple-cli", "version": version]]
         case "ping": reply["result"] = [:]
-        case "tools/list": reply["result"] = ["tools": tools(deletes: deletes).map(schema)]
+        case "tools/list": reply["result"] = ["tools": tools(for: caller).map(schema)]
         case "tools/call":
             let name = params["name"] as? String ?? ""
-            if let cmd = tools(deletes: deletes).first(where: { $0.toolName == name }) {
+            if let cmd = tools(for: caller).first(where: { $0.toolName == name }) {
                 do {
                     let out = try await registry.run(cmd, Args(raw: params["arguments"] as? [String: Any] ?? [:], viaMCP: true))
                     reply["result"] = ["content": [["type": "text", "text": jsonString(out)]],
@@ -211,16 +222,39 @@ final class MCPServer {
 
 // MARK: - MCP over HTTP (streamable HTTP transport, JSON responses only)
 
-/// One endpoint, POST /mcp, behind a bearer token read from a mode-600 file. Read-only unless
-/// started with --writes. Requests run side by side, up to the authenticated-connection cap.
+/// Who is calling over HTTP. It sets which tools they get.
+enum Caller: Equatable {
+    /// The MacBook's router, holding the CLI token. Everything, deletes too.
+    case cli
+    /// Agents on the tailnet, holding the agent token. Reads and writes.
+    case agent
+    /// A person signed in through Cloudflare Access (claude.ai). Reads and writes.
+    case person(String)
+    /// A Cloudflare Access service token (cloud sessions). Reads and writes, minus sending.
+    case service(String)
+    var label: String {
+        switch self {
+        case .cli: return " [cli token]"
+        case .agent: return ""
+        case .person: return " [cloudflare login]"
+        case .service: return " [cloudflare service token]"
+        }
+    }
+}
+
+/// One endpoint, POST /mcp. The tailnet listener takes a bearer token read from a mode-600 file. The
+/// optional Cloudflare listener sits on loopback, behind the mini's Cloudflare tunnel, and takes only
+/// requests carrying a valid Cloudflare Access signature. Read-only unless started with --writes.
+/// Requests run side by side, up to the authenticated-connection cap.
 enum HTTPServer {
     static let maxBody = 1 << 20
 
     static func start(_ argv: [String], registry: Registry) async throws -> Never {
         var opts: [String: String] = [:], writes = false, k = 0
+        let valued = ["--host", "--port", "--token-file", "--cli-token-file", "--access-port", "--access-team", "--access-aud"]
         while k < argv.count {
             let a = argv[k]
-            if a == "--writes" { writes = true } else if ["--host", "--port", "--token-file", "--cli-token-file"].contains(a), k + 1 < argv.count {
+            if a == "--writes" { writes = true } else if valued.contains(a), k + 1 < argv.count {
                 opts[String(a.dropFirst(2))] = argv[k + 1]; k += 1
             } else { throw AppleError.invalid("unknown serve argument \(a)") }
             k += 1
@@ -233,23 +267,57 @@ enum HTTPServer {
         let cliTokenPath = opts["cli-token-file"] ?? NSHomeDirectory() + "/.config/apple-cli/cli-token"
         let cliToken = FileManager.default.fileExists(atPath: cliTokenPath) ? try readToken(cliTokenPath) : nil
         guard cliToken != token else { throw AppleError.refused("the CLI token and the agent token must differ") }
+        var access: AccessCheck?
+        if let p = opts["access-port"] {
+            guard let team = opts["access-team"], let aud = opts["access-aud"] else {
+                throw AppleError.invalid("--access-port needs --access-team (the Cloudflare team name) and --access-aud (the Access app's audience tag)")
+            }
+            guard let ap = NWEndpoint.Port(p), ap != port else { throw AppleError.invalid("bad --access-port") }
+            access = AccessCheck(team: team, aud: aud, port: ap)
+        }
 
         let mode = writes ? "reads and writes" : "read-only"
         let mcp = MCPServer(registry: registry, allowWrites: writes)
-        let (queue, feed) = AsyncStream.makeStream(of: (Data, NWConnection, Bool).self)
+        let (queue, feed) = AsyncStream.makeStream(of: (Data, NWConnection, Caller).self)
         // Each request runs on its own, so one slow tool (an app launching, a prompt on screen) never holds up
         // the rest. The authenticated-connection cap bounds how many run at once.
         Task {
-            for await (body, conn, deletes) in queue {
+            for await (body, conn, caller) in queue {
                 Task.detached {
                     let t = Date()
                     defer { io.async { runningTools -= 1 } }
-                    if let reply = await mcp.handle(body, deletes: deletes) { respond(conn, 200, reply) } else { respond(conn, 202, Data()) }
-                    log("\(describe(body))\(deletes ? " [cli token]" : "") \(Int(Date().timeIntervalSince(t) * 1000)) ms")
+                    if let reply = await mcp.handle(body, caller: caller) { respond(conn, 200, reply) } else { respond(conn, 202, Data()) }
+                    log("\(describe(body))\(caller.label) \(Int(Date().timeIntervalSince(t) * 1000)) ms")
                 }
             }
         }
 
+        try listen(host: host, port: port, perIP: maxUnauthedPerIP, feed: feed, name: "MCP on http://\(host):\(port)/mcp, \(mode)") { head, done in
+            // Browsers send Origin; MCP clients do not. Refusing it blocks DNS-rebinding pages.
+            guard head.headers["origin"] == nil else { return done(nil, 403) }
+            let auth = head.headers["authorization"] ?? ""
+            if let cliToken, equalTimingSafe(auth, "Bearer " + cliToken) { return done(.cli, 200) }
+            done(equalTimingSafe(auth, "Bearer " + token) ? .agent : nil, 401)
+        }
+        if let access {
+            io.async { access.refreshKeys {} }
+            // Every connection here comes from cloudflared on 127.0.0.1, so its per-address cap is this listener's
+            // whole cap. Half the shared pool, so it can never crowd out the tailnet listener.
+            try listen(host: "127.0.0.1", port: access.port, perIP: maxUnauthed / 2, feed: feed,
+                       name: "MCP for Cloudflare Access on http://127.0.0.1:\(access.port)/mcp, \(mode)") { head, done in
+                // Access also lets in browsers holding its login cookie, so a page on another site could post here
+                // in your name. MCP clients send no Origin and always send JSON; a browser form can do neither.
+                guard head.headers["origin"] == nil, (head.headers["content-type"] ?? "").lowercased().hasPrefix("application/json") else { return done(nil, 403) }
+                access.verify(head.headers["cf-access-jwt-assertion"] ?? "") { caller in done(caller, 401) }
+            }
+        }
+        while true { try await Task.sleep(nanoseconds: 3_600_000_000_000) }
+    }
+
+    /// Accepts connections on one address. `authorize` runs on io once the headers are in and calls back,
+    /// also on io, with the caller, or nil and the status to refuse with. It runs before any body is read.
+    static func listen(host: String, port: NWEndpoint.Port, perIP: Int, feed: AsyncStream<(Data, NWConnection, Caller)>.Continuation,
+                       name: String, authorize: @escaping (Head, @escaping (Caller?, Int) -> Void) -> Void) throws {
         let params = NWParameters.tcp
         params.requiredLocalEndpoint = .hostPort(host: NWEndpoint.Host(host), port: port)
         params.allowLocalEndpointReuse = true
@@ -258,7 +326,7 @@ enum HTTPServer {
             // Connections without a valid token yet have their own small cap and 2 seconds to send headers,
             // so they cannot use up the slots of clients that have authenticated.
             let ip: String = { if case .hostPort(let h, _) = conn.endpoint { return "\(h)" }; return "?" }()
-            guard openUnauthed < maxUnauthed, unauthedByIP[ip, default: 0] < maxUnauthedPerIP else { return conn.cancel() }
+            guard openUnauthed < maxUnauthed, unauthedByIP[ip, default: 0] < perIP else { return conn.cancel() }
             openUnauthed += 1; unauthedByIP[ip, default: 0] += 1
             let slot = Slot()
             let leaveUnauthed = { openUnauthed -= 1; unauthedByIP[ip, default: 1] -= 1; if unauthedByIP[ip] == 0 { unauthedByIP[ip] = nil } }
@@ -272,46 +340,108 @@ enum HTTPServer {
                 }
             }
             conn.start(queue: io)
-            io.asyncAfter(deadline: .now() + headDeadline) { if !slot.authed { conn.cancel() } }
+            // Only slow headers are cut off. A signature check that waits on a key fetch has its own 10-second bound.
+            io.asyncAfter(deadline: .now() + headDeadline) { if !slot.headDone { conn.cancel() } }
             readHead(conn, Data()) { head, rest in
+                slot.headDone = true
                 guard let head else { return respond(conn, 400, Data("bad request".utf8)) }
                 guard head.path == "/mcp" else { return respond(conn, 404, Data()) }
                 guard head.method == "POST" else { return respond(conn, 405, Data(), extra: ["Allow": "POST"]) }
-                // Browsers send Origin; MCP clients do not. Refusing it blocks DNS-rebinding pages.
-                guard head.headers["origin"] == nil else { return respond(conn, 403, Data()) }
-                // The token is checked before any body is read.
-                let auth = head.headers["authorization"] ?? ""
-                let isCLI = cliToken.map { equalTimingSafe(auth, "Bearer " + $0) } ?? false
-                guard isCLI || equalTimingSafe(auth, "Bearer " + token) else {
-                    log("refused: bad or missing token from \(conn.endpoint)")
-                    return respond(conn, 401, Data())
-                }
-                guard openAuthed < maxAuthed else { return respond(conn, 503, Data()) }
-                leaveUnauthed(); openAuthed += 1; slot.authed = true
-                guard let length = Int(head.headers["content-length"] ?? "0"), length >= 0, length <= maxBody else {
-                    return respond(conn, 400, Data("bad content-length".utf8))
-                }
-                // Reading the body must finish within the deadline. Answering it can take longer.
-                io.asyncAfter(deadline: .now() + bodyDeadline) { if !slot.readDone { conn.cancel() } }
-                readBody(conn, rest, length: length) { body in
-                    guard let body else { return respond(conn, 400, Data("bad request".utf8)) }
-                    slot.readDone = true
-                    // Running tools are capped on their own: a client that hangs up does not free its tool's slot.
-                    guard runningTools < maxRunningTools else { return respond(conn, 503, Data()) }
-                    runningTools += 1
-                    feed.yield((body, conn, isCLI))
+                authorize(head) { caller, refusal in
+                    guard let caller else {
+                        log("refused (\(refusal)) on :\(port) from \(conn.endpoint)")
+                        return respond(conn, refusal, Data())
+                    }
+                    guard !slot.released else { return }
+                    guard openAuthed < maxAuthed else { return respond(conn, 503, Data()) }
+                    leaveUnauthed(); openAuthed += 1; slot.authed = true
+                    guard let length = Int(head.headers["content-length"] ?? "0"), length >= 0, length <= maxBody else {
+                        return respond(conn, 400, Data("bad content-length".utf8))
+                    }
+                    // Reading the body must finish within the deadline. Answering it can take longer.
+                    io.asyncAfter(deadline: .now() + bodyDeadline) { if !slot.readDone { conn.cancel() } }
+                    readBody(conn, rest, length: length) { body in
+                        guard let body else { return respond(conn, 400, Data("bad request".utf8)) }
+                        slot.readDone = true
+                        // Running tools are capped on their own: a client that hangs up does not free its tool's slot.
+                        guard runningTools < maxRunningTools else { return respond(conn, 503, Data()) }
+                        runningTools += 1
+                        feed.yield((body, conn, caller))
+                    }
                 }
             }
         }
         listener.stateUpdateHandler = { state in
             switch state {
-            case .ready: log("apple-cli \(version) serving MCP on http://\(host):\(port)/mcp, \(mode)")
-            case .failed(let e): log("listener failed: \(e)"); exit(1)
+            case .ready: log("apple-cli \(version) serving \(name)")
+            case .failed(let e): log("listener on :\(port) failed: \(e)"); exit(1)
             default: break
             }
         }
         listener.start(queue: io)
-        while true { try await Task.sleep(nanoseconds: 3_600_000_000_000) }
+    }
+
+    /// Checks the signed token Cloudflare Access adds to every request it lets through, the
+    /// `Cf-Access-Jwt-Assertion` header: an RS256 JWT signed by the team's keys, for this app's audience tag.
+    /// A token with an email is a signed-in person; one with only a `common_name` is a service token.
+    final class AccessCheck: @unchecked Sendable {  // keys and waiters are only touched on io
+        let team: String, aud: String, port: NWEndpoint.Port
+        var keys: [String: SecKey] = [:]
+        var lastFetch = Date.distantPast
+        var waiters: [() -> Void]?
+        init(team: String, aud: String, port: NWEndpoint.Port) { self.team = team; self.aud = aud; self.port = port }
+        var issuer: String { "https://\(team).cloudflareaccess.com" }
+
+        func verify(_ jwt: String, _ done: @escaping (Caller?) -> Void) {
+            let parts = jwt.split(separator: ".", omittingEmptySubsequences: false).map(String.init)
+            guard parts.count == 3, let headData = Self.base64url(parts[0]), let bodyData = Self.base64url(parts[1]),
+                  let sig = Self.base64url(parts[2]),
+                  let head = (try? JSONSerialization.jsonObject(with: headData)) as? [String: Any],
+                  let claims = (try? JSONSerialization.jsonObject(with: bodyData)) as? [String: Any],
+                  head["alg"] as? String == "RS256", let kid = head["kid"] as? String else { return done(nil) }
+            let check = { [self] in
+                guard let key = keys[kid] else { log("cloudflare token signed with an unknown key"); return done(nil) }
+                let signed = Data((parts[0] + "." + parts[1]).utf8)
+                guard SecKeyVerifySignature(key, .rsaSignatureMessagePKCS1v15SHA256, signed as CFData, sig as CFData, nil) else { return done(nil) }
+                let now = Date().timeIntervalSince1970
+                let auds = (claims["aud"] as? [String]) ?? [(claims["aud"] as? String) ?? ""]
+                guard claims["iss"] as? String == issuer, auds.contains(aud),
+                      let exp = (claims["exp"] as? NSNumber)?.doubleValue, exp > now - 30,
+                      ((claims["nbf"] as? NSNumber)?.doubleValue ?? 0) < now + 30 else { return done(nil) }
+                if let email = claims["email"] as? String, !email.isEmpty { return done(.person(email)) }
+                if let cn = claims["common_name"] as? String, !cn.isEmpty { return done(.service(cn)) }
+                done(nil)
+            }
+            if keys[kid] == nil, waiters != nil || Date().timeIntervalSince(lastFetch) > 60 { refreshKeys(check) } else { check() }
+        }
+
+        /// Fetches the team's signing certificates. Callers that arrive while a fetch runs wait for it.
+        func refreshKeys(_ then: @escaping () -> Void) {
+            if waiters != nil { waiters?.append(then); return }
+            waiters = [then]; lastFetch = Date()
+            let url = URL(string: issuer + "/cdn-cgi/access/certs")!
+            URLSession.shared.dataTask(with: URLRequest(url: url, timeoutInterval: 10)) { data, _, error in
+                var fresh: [String: SecKey] = [:]
+                let certs = (data.flatMap { try? JSONSerialization.jsonObject(with: $0) } as? [String: Any])?["public_certs"] as? [[String: Any]] ?? []
+                for c in certs {
+                    guard let kid = c["kid"] as? String, let pem = c["cert"] as? String else { continue }
+                    let b64 = pem.split(separator: "\n").filter { !$0.hasPrefix("-----") }.joined()
+                    if let der = Data(base64Encoded: b64), let cert = SecCertificateCreateWithData(nil, der as CFData),
+                       let key = SecCertificateCopyKey(cert) { fresh[kid] = key }
+                }
+                io.async { [self] in
+                    if fresh.isEmpty { log("could not fetch Cloudflare Access keys: \(error.map { "\($0)" } ?? "no certificates in the reply")") } else { keys = fresh }
+                    let w = waiters ?? []; waiters = nil
+                    w.forEach { $0() }
+                }
+            }.resume()
+        }
+
+        static func base64url(_ s: String) -> Data? {
+            var b = s.replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/")
+            b += String(repeating: "=", count: (4 - b.count % 4) % 4)
+            return Data(base64Encoded: b)
+        }
     }
 
     /// The token file must be private to this user, so a copy in a world-readable place is refused.
@@ -332,7 +462,7 @@ enum HTTPServer {
     /// Tools running now, counted from accept to return. Only touched on io.
     nonisolated(unsafe) static var runningTools = 0
     static let maxRunningTools = 8
-    final class Slot: @unchecked Sendable { var released = false; var authed = false; var readDone = false }  // only touched on io
+    final class Slot: @unchecked Sendable { var released = false; var authed = false; var headDone = false; var readDone = false }  // only touched on io
 
     struct Head { let method: String; let path: String; let headers: [String: String] }
 
