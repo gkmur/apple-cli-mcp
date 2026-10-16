@@ -13,9 +13,9 @@ import argparse, datetime, json, os, subprocess, sys, time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import common
 from common import BIN, ROOT, TOKEN, step, check
-import notes, reminders, contacts, messages, photos, calendar
+import notes, reminders, contacts, messages, photos, calendar, safari
 
-APPS = {"notes": notes, "reminders": reminders, "contacts": contacts, "messages": messages, "photos": photos, "calendar": calendar}
+APPS = {"notes": notes, "reminders": reminders, "contacts": contacts, "messages": messages, "photos": photos, "calendar": calendar, "safari": safari}
 
 
 def mcp():
