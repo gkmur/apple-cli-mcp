@@ -23,14 +23,35 @@ apple-cli permissions --request
 
 This shows each prompt not yet answered (Contacts, Calendars, Reminders, Photos, control of Notes and Music). It also opens the Full Disk Access pane with AppleCLI.app selected in Finder; drag it into the list and switch it on. Run it from a logged-in session, because prompts cannot show over SSH. The grants are tied to the signing certificate, so rebuilds keep them.
 
-### Routing: the mini does the work
+### On an always-on Mac
 
-On the MacBook, `remote.url` in `~/.config/apple-cli/config.json` points at the mini. Every command of Mail, Messages, Reminders, Calendar, Contacts, and Notes then runs on the mini (`remote.apps` changes the list), reads and writes alike, and prints `(ran on the mini)`. Whole apps move together because IDs differ between Macs: an event, contact, or email ID from one Mac names nothing, or something else, on the other.
+```bash
+apple-cli serve --host <tailscale-ip> --token-file ~/.config/apple-cli/server-token --writes
+```
 
-- Music, Photos, Safari, Voice Memos, call history, Shortcuts, `person`, `today`, `search`, `permissions`, and `doctor` run on the MacBook.
-- Deletes of routed apps run on the mini too. The router uses the CLI token (`~/.config/apple-cli/remote-token` here, `cli-token` on the mini), which can delete; the agent token cannot.
-- A text with a file from this Mac is drafted and sent here. Email with attachments from this Mac needs `--local`. Saved mail attachments land on the mini.
-- If the mini is unreachable, routed commands fail with a clear error and run nowhere. `--local` (or `APPLE_CLI_LOCAL=1`) runs one on this Mac's copy.
+Run this on a Mac that stays awake (I use a Mac mini), as a launchd job. It listens on the Tailscale address only, port 7790, and needs the bearer token in the token file (mode 600). With `--writes`, agents on your tailnet can draft and send texts and email, and edit your apps; deletes stay CLI only. Without it the server is read-only. The log records method and tool names only.
+
+The first run needs a logged-in session on that Mac: allow AppleCLI through the firewall, answer the permission prompts, and give it Full Disk Access.
+
+### From claude.ai and cloud sessions
+
+`--access-port 7791 --access-team TEAM --access-aud TAG` adds a second listener on `127.0.0.1:7791` for a Cloudflare tunnel, with a Cloudflare Access app in front. apple-cli checks Access's signed header, `Cf-Access-Jwt-Assertion`, against the team's keys and that app's audience tag, so a request that skipped Access is refused.
+
+- **claude.ai**: add the tunnel's `/mcp` URL as a custom connector. Access handles the login and gives claude.ai a token that refreshes for 2 weeks. You get reads and writes, sends included.
+- **Cloud sessions and scripts**: send an Access service token as headers `CF-Access-Client-Id` and `CF-Access-Client-Secret`. They get reads, drafts, and edits. `mail_send` and `messages_send` are not offered.
+- Deletes stay with the local CLI token.
+- Leave out `--access-port` and this listener never starts.
+
+### Routing: one Mac does the work
+
+On a laptop, set `remote.url` in `~/.config/apple-cli/config.json` to the always-on Mac. Every command of Mail, Messages, Reminders, Calendar, Contacts, and Notes then runs there (`remote.apps` changes the list), reads and writes alike, and prints `(ran on the mini)`. Whole apps move together because IDs differ between Macs: an event, contact, or email ID from one Mac names nothing, or something else, on the other.
+
+- Music, Photos, Safari, Voice Memos, call history, Shortcuts, `person`, `today`, `search`, `permissions`, and `doctor` run locally.
+- Deletes of routed apps run remotely too. The router uses the CLI token (`~/.config/apple-cli/remote-token`), which can delete; the agent token cannot.
+- A text with a file from this Mac is drafted and sent here. Email with attachments from this Mac needs `--local`. Saved mail attachments land on the remote Mac.
+- If the remote Mac is unreachable, routed commands fail with a clear error and run nowhere. `--local` (or `APPLE_CLI_LOCAL=1`) runs one on this Mac's copy.
+- Both Macs must run the same version; the router refuses otherwise.
+- Notes and Mail only refresh their local copies while open, so reopen them in the background on a schedule on the remote Mac.
 
 ## Commands
 
@@ -118,6 +139,7 @@ The MCP server exposes the same commands as tools (`notes_search`, `contacts_rea
 Texts and email go out in two steps. `messages draft` and `mail draft` resolve the recipient and save a draft (`d_1a2b3c4d`) that shows exactly what will be sent. `messages send <id>` or `mail send <id>` sends that draft unchanged. A draft sends once and expires after an hour. Agents must show the draft to you and wait for your yes before sending; the draft ID makes sure what you approved is what leaves.
 
 - A text goes to an existing chat (a group, or anyone you have texted) or starts a new one with a phone or email, over iMessage or `--sms`. `send` then watches `chat.db` and reports `delivered`, `sent`, `sending`, or `failed`.
+- Email goes through Mail.app from any account set up in Mail.app. Replies and forwards keep threading. `send` confirms the copy in a Sent mailbox. A reply or forward of a message masked as a one-time code, or one whose body Mail has not downloaded, is refused.
 - At most 30 sends an hour (`send.sendsPerHour` in config), counted in `~/Library/Logs/apple-cli/sends.log` under a lock.
 - Every write, send included, adds a line to `~/Library/Logs/apple-cli/audit.log`: time, command, recipient, status. Never message text.
 - Over MCP, attachments must already be in `~/Downloads/apple-cli`, so an agent cannot mail out arbitrary files.
@@ -128,6 +150,7 @@ Texts and email go out in two steps. `messages draft` and `mail draft` resolve t
 - `notes append` refuses a note with a checklist, table, image, hashtag, or link, unless you pass `--force`. Notes rewrites the whole body on a scripted append and drops those.
 - Checkbox lines in Markdown become plain bullets when written. Notes scripting cannot create checklists.
 - A note Notes has not downloaded from iCloud yet lists with no title, and `read` says so. Open it once in Notes to fetch it.
+- `notes trash` moves the note into Recently Deleted. A scripted `delete` stays unsaved until Notes' next insert.
 - If Apple changes a database layout in an OS update, reads fail with `schema_changed` instead of returning wrong data. Run `apple-cli doctor`.
 - A contact's `synced` is true once iCloud's CardDAV server has accepted the card, and null for linked people.
 - `messages read` takes a chat ID, a group name, a contact name, a phone number, or an email. `--since` and `--before` take `YYYY-MM-DD [HH:MM]`, `today`, `yesterday`, or `7d`/`12h`/`30m` ago.
@@ -152,8 +175,11 @@ Texts and email go out in two steps. `messages draft` and `mail draft` resolve t
 python3 scripts/e2e/run.py
 ```
 
+For each app, it creates a test item through the write path, reads it back, waits for iCloud to accept it, then removes it. It finishes by checking the MCP server. `--app contacts` runs one app. Writes `reports/e2e-<timestamp>.md`.
+
 ## Add an app
 
+1. Map the app's storage first: where it lives, its schema, and which official API (if any) reads and writes it.
 2. Add `Sources/AppleKit/Domains/<App>.swift` with a settings struct, a `Domain`, and its commands. Mark each command `.read`, `.write`, or `.destructive`.
 3. Add it to `allDomains` in `Core/Interface.swift`.
 4. Add `scripts/e2e/<app>.py` and register it in `run.py`.

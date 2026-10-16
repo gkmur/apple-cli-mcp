@@ -238,6 +238,8 @@ final class PhotosStore {
             guard fm.fileExists(atPath: p + "/database/Photos.sqlite") else { throw AppleError.notFound("Photos library at \(p)") }
             return p
         }
+        // The library the Photos app opens, wherever it lives (the mini keeps it on an external SSD).
+        if let p = photosAppLibrary(), fm.fileExists(atPath: p + "/database/Photos.sqlite") { return p }
         let pics = NSHomeDirectory() + "/Pictures"
         let preferred = pics + "/Photos.photoslibrary"
         if fm.fileExists(atPath: preferred + "/database/Photos.sqlite") { return preferred }
@@ -245,6 +247,18 @@ final class PhotosStore {
             .map { pics + "/" + $0 }.first { fm.fileExists(atPath: $0 + "/database/Photos.sqlite") }
         guard let any else { throw AppleError.notFound("Photos library in ~/Pictures. Set photos.libraryPath in the config.") }
         return any
+    }
+
+    /// The path in the Photos app's saved bookmark to its current library, `IPXDefaultLibraryURLBookmark`.
+    /// Nil when Photos has never chosen one or the drive holding it is not mounted.
+    static func photosAppLibrary() -> String? {
+        // Photos is sandboxed, so its settings live in its container, not ~/Library/Preferences.
+        let plist = NSHomeDirectory() + "/Library/Containers/com.apple.Photos/Data/Library/Preferences/com.apple.Photos.plist"
+        guard let raw = FileManager.default.contents(atPath: plist),
+              let prefs = try? PropertyListSerialization.propertyList(from: raw, format: nil) as? [String: Any],
+              let data = prefs["IPXDefaultLibraryURLBookmark"] as? Data else { return nil }
+        var stale = false
+        return (try? URL(resolvingBookmarkData: data, options: [.withoutUI, .withoutMounting], relativeTo: nil, bookmarkDataIsStale: &stale))?.path
     }
 
     /// The library as Photos shows it, minus privacy exclusions.

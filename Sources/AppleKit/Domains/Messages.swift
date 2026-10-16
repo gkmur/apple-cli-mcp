@@ -663,6 +663,14 @@ final class MessageSender {
         return result
     }
 
+    /// How Messages names a one-person chat: an email as is, a phone number as +digits (+1 added to a
+    /// 10-digit US number), so "(555) 010-0199" finds the chat "+15550100199".
+    static func chatIdentifier(_ handle: String) -> String {
+        if handle.contains("@") { return handle.lowercased() }
+        let digits = handle.filter(\.isNumber)
+        return digits.count == 10 && !handle.hasPrefix("+") ? "+1" + digits : "+" + digits
+    }
+
     /// Watches chat.db for the outgoing row for up to 15 seconds and reports what Messages did with it.
     private func confirm(target: String, isChat: Bool, text: String, since: Date, to: String) -> SendResult {
         let deadline = Date().addingTimeInterval(15)
@@ -675,8 +683,9 @@ final class MessageSender {
                 JOIN chat_message_join j ON j.message_id = m.ROWID JOIN chat c ON c.ROWID = j.chat_id
                 WHERE m.is_from_me = 1 AND m.date >= ? AND (c.guid = ? OR c.chat_identifier = ?)
                 ORDER BY m.date DESC LIMIT 5
-                """, [MessagesStore.raw(since.addingTimeInterval(-2)), target, target])) ?? []
-            guard let r = rows.first(where: { text.isEmpty || ($0.str("text") ?? "") == text }) ?? rows.first else { continue }
+                """, [MessagesStore.raw(since.addingTimeInterval(-2)), target, isChat ? target : Self.chatIdentifier(target)])) ?? []
+            // Only this send's row counts. A file-only send has no text to match, so it takes the newest row.
+            guard let r = text.isEmpty ? rows.first : rows.first(where: { ($0.str("text") ?? "") == text }) else { continue }
             last = r
             if (r.int("error") ?? 0) != 0 { return SendResult(status: "failed", to: to, messageId: r.str("guid"), detail: "Messages error \(r.int("error")!)") }
             if r.bool("is_delivered") { return SendResult(status: "delivered", to: to, messageId: r.str("guid"), detail: nil) }

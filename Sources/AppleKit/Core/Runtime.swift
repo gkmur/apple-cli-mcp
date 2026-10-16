@@ -372,7 +372,9 @@ struct Draft: Codable {
         let d = Draft(id: "d_" + UUID().uuidString.prefix(8).lowercased(), kind: kind, created: Date(), summary: summary, payload: payload)
         try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         let path = dir + "/\(d.id).json"
-        FileManager.default.createFile(atPath: path, contents: try JSONEncoder().encode(d), attributes: [.posixPermissions: 0o600])
+        guard FileManager.default.createFile(atPath: path, contents: try JSONEncoder().encode(d), attributes: [.posixPermissions: 0o600]) else {
+            throw AppleError.app("could not write the draft to \(path)")
+        }
         return d
     }
 
@@ -380,12 +382,23 @@ struct Draft: Codable {
     static func take(_ id: String, kind: String) throws -> Draft {
         guard id.range(of: #"^d_[0-9a-f]{8}$"#, options: .regularExpression) != nil else { throw AppleError.invalid("draft ID looks like d_1a2b3c4d") }
         let path = dir + "/\(id).json", claimed = path + ".sending"
+        // A draft of the other kind is left alone, so sending an email ID as a text cannot destroy the email.
+        if let peek = try? JSONDecoder().decode(Draft.self, from: Data(contentsOf: URL(fileURLWithPath: path))), peek.kind != kind {
+            throw AppleError.invalid("\(id) is a \(peek.kind) draft")
+        }
         guard rename(path, claimed) == 0 else { throw AppleError.notFound("draft \(id) (already sent, expired, or never made)") }
         defer { unlink(claimed) }
         let d = try JSONDecoder().decode(Draft.self, from: Data(contentsOf: URL(fileURLWithPath: claimed)))
         guard d.kind == kind else { throw AppleError.invalid("\(id) is a \(d.kind) draft") }
         guard Date().timeIntervalSince(d.created) < ttl else { throw AppleError.refused("draft \(id) expired; draft it again") }
         return d
+    }
+
+    /// Puts a taken draft back, for a send that failed before anything left the Mac, so the approved
+    /// draft can be sent again without redrafting.
+    static func restore(_ d: Draft) {
+        let path = dir + "/\(d.id).json"
+        if let data = try? JSONEncoder().encode(d) { FileManager.default.createFile(atPath: path, contents: data, attributes: [.posixPermissions: 0o600]) }
     }
 }
 

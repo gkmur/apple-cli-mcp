@@ -44,6 +44,10 @@ final class Registry {
             // No fallback to this Mac: IDs from one Mac do not name the same item on the other, so a read here
             // followed by a write there could change the wrong thing.
             do { return try await remote.call(c.toolName, args.raw) } catch let e as Router.Unreachable {
+                // A write may have run before the connection broke, so it must not be retried here blindly.
+                if e.afterCall && c.effect != .read {
+                    throw AppleError.app("\(e.reason) while \(c.toolName) ran on the mini. It may have gone through: check before trying again")
+                }
                 throw AppleError.app("\(e.reason). \(c.path[0]) runs on the mini; pass --local to use this Mac's copy instead")
             }
         }
@@ -81,9 +85,16 @@ public enum CLI {
         OwnApp.exitWithParent()
         let reg = Registry()
         var args = Array(argv.dropFirst())
-        let json = args.contains("--json")
-        if args.contains("--local") { Router.forceLocal = true }
-        args.removeAll { $0 == "--json" || $0 == "--local" }
+        let booleanFlags = Set(reg.commands.flatMap { c in c.params.filter { $0.kind == .boolean }.map { "--" + $0.name } })
+        // --json and --local are global flags, removed wherever they stand as flags. A value that happens
+        // to read "--json" (`--body --json`) stays, because the word before it takes a value.
+        var json = false, kept: [String] = [], prev: String?
+        for a in args {
+            let isValue = prev.map { $0.hasPrefix("--") && !$0.contains("=") && !["--json", "--local"].contains($0) && !booleanFlags.contains($0) } ?? false
+            if !isValue && a == "--json" { json = true } else if !isValue && a == "--local" { Router.forceLocal = true } else { kept.append(a) }
+            prev = a
+        }
+        args = kept
 
         if args.first == "mcp" { await MCPServer(registry: reg).serve(); return 0 }
         if args.first == "serve" {
@@ -300,9 +311,10 @@ enum HTTPServer {
             done(equalTimingSafe(auth, "Bearer " + token) ? .agent : nil, 401)
         }
         if let access {
-            access.refreshKeys {}
-            // Every connection here comes from cloudflared on 127.0.0.1, so the per-address cap is the whole cap.
-            try listen(host: "127.0.0.1", port: access.port, perIP: maxUnauthed, feed: feed,
+            io.async { access.refreshKeys {} }
+            // Every connection here comes from cloudflared on 127.0.0.1, so its per-address cap is this listener's
+            // whole cap. Half the shared pool, so it can never crowd out the tailnet listener.
+            try listen(host: "127.0.0.1", port: access.port, perIP: maxUnauthed / 2, feed: feed,
                        name: "MCP for Cloudflare Access on http://127.0.0.1:\(access.port)/mcp, \(mode)") { head, done in
                 // Access also lets in browsers holding its login cookie, so a page on another site could post here
                 // in your name. MCP clients send no Origin and always send JSON; a browser form can do neither.
@@ -339,8 +351,10 @@ enum HTTPServer {
                 }
             }
             conn.start(queue: io)
-            io.asyncAfter(deadline: .now() + headDeadline) { if !slot.authed { conn.cancel() } }
+            // Only slow headers are cut off. A signature check that waits on a key fetch has its own 10-second bound.
+            io.asyncAfter(deadline: .now() + headDeadline) { if !slot.headDone { conn.cancel() } }
             readHead(conn, Data()) { head, rest in
+                slot.headDone = true
                 guard let head else { return respond(conn, 400, Data("bad request".utf8)) }
                 guard head.path == "/mcp" else { return respond(conn, 404, Data()) }
                 guard head.method == "POST" else { return respond(conn, 405, Data(), extra: ["Allow": "POST"]) }
@@ -409,7 +423,7 @@ enum HTTPServer {
                 if let cn = claims["common_name"] as? String, !cn.isEmpty { return done(.service(cn)) }
                 done(nil)
             }
-            if keys[kid] == nil, Date().timeIntervalSince(lastFetch) > 60 { refreshKeys(check) } else { check() }
+            if keys[kid] == nil, waiters != nil || Date().timeIntervalSince(lastFetch) > 60 { refreshKeys(check) } else { check() }
         }
 
         /// Fetches the team's signing certificates. Callers that arrive while a fetch runs wait for it.
@@ -459,7 +473,7 @@ enum HTTPServer {
     /// Tools running now, counted from accept to return. Only touched on io.
     nonisolated(unsafe) static var runningTools = 0
     static let maxRunningTools = 8
-    final class Slot: @unchecked Sendable { var released = false; var authed = false; var readDone = false }  // only touched on io
+    final class Slot: @unchecked Sendable { var released = false; var authed = false; var headDone = false; var readDone = false }  // only touched on io
 
     struct Head { let method: String; let path: String; let headers: [String: String] }
 
@@ -551,7 +565,11 @@ struct RemoteSettings: DomainSettings {
 
 enum Router {
     nonisolated(unsafe) static var forceLocal = ProcessInfo.processInfo.environment["APPLE_CLI_LOCAL"] != nil
-    struct Unreachable: Error { let reason: String }
+    struct Unreachable: Error {
+        let reason: String
+        /// True when the tool call itself was sent, so the mini may have run it.
+        var afterCall = false
+    }
 
     static func target(for c: Command, _ args: Args, _ ctx: Context) throws -> RemoteClient? {
         guard !forceLocal, let s = try? ctx.settings(RemoteSettings.self), !s.url.isEmpty else { return nil }
@@ -578,7 +596,7 @@ struct RemoteClient {
         token = try HTTPServer.readToken((tokenFile as NSString).expandingTildeInPath)
     }
 
-    private func post(_ body: [String: Any], timeout: TimeInterval) async throws -> [String: Any] {
+    private func post(_ body: [String: Any], timeout: TimeInterval, isCall: Bool = false) async throws -> [String: Any] {
         var req = URLRequest(url: url, timeoutInterval: timeout)
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -586,12 +604,12 @@ struct RemoteClient {
         req.httpBody = try JSONSerialization.data(withJSONObject: body)
         let data: Data, resp: URLResponse
         do { (data, resp) = try await URLSession.shared.data(for: req) } catch {
-            throw Router.Unreachable(reason: "the mini (\(url.host ?? "?")) is unreachable: \(error.localizedDescription)")
+            throw Router.Unreachable(reason: "the mini (\(url.host ?? "?")) is unreachable: \(error.localizedDescription)", afterCall: isCall)
         }
         let status = (resp as? HTTPURLResponse)?.statusCode ?? 0
         guard status == 200, let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             if status == 401 { throw AppleError.permission("the mini refused the token in remote.tokenFile") }
-            throw Router.Unreachable(reason: "the mini answered HTTP \(status)")
+            throw Router.Unreachable(reason: "the mini answered HTTP \(status)", afterCall: isCall && status >= 500 && status != 503)
         }
         return obj
     }
@@ -603,7 +621,7 @@ struct RemoteClient {
         guard theirs == version else {
             throw AppleError.refused("this Mac runs apple-cli \(version) and the mini runs \(theirs). Install the same version on both, or pass --local")
         }
-        let reply = try await post(["jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": ["name": tool, "arguments": arguments]], timeout: 300)
+        let reply = try await post(["jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": ["name": tool, "arguments": arguments]], timeout: 300, isCall: true)
         if let err = reply["error"] as? [String: Any] { throw AppleError.app("the mini: \(err["message"] as? String ?? "error")") }
         guard let result = reply["result"] as? [String: Any] else { throw AppleError.app("the mini sent no result") }
         let text = ((result["content"] as? [[String: Any]])?.first?["text"] as? String) ?? ""

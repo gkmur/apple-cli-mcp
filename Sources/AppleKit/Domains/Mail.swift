@@ -769,6 +769,23 @@ final class MailWriter {
             on run argv
                 set {vMode, vAcct, vBoxPath, vRowid, vFromAddr, vToList, vCcList, vBccList, vSubj, vBodyText, vAttachList, vSaveOnly} to argv
                 tell application "Mail"
+                    -- Checked before any message exists, so a bad address leaves nothing behind. Some accounts
+                    -- throw on reading their address list ("On My Mac", and Yahoo added through Internet Accounts),
+                    -- so each read is tried on its own, and an account whose user name is the address counts too.
+                    if vFromAddr is not "" then
+                        set vKnown to false
+                        repeat with a in accounts
+                            try
+                                if (user name of a as text) is vFromAddr then set vKnown to true
+                            end try
+                            try
+                                repeat with e in (email addresses of a)
+                                    if (e as text) is vFromAddr then set vKnown to true
+                                end repeat
+                            end try
+                        end repeat
+                        if not vKnown then error "not sent: no Mail account sends from " & vFromAddr
+                    end if
                     if vMode is "new" then
                         set vMsg to make new outgoing message with properties {subject:vSubj, content:vBodyText, visible:false}
                     else
@@ -783,16 +800,10 @@ final class MailWriter {
                         delete every to recipient of vMsg
                         delete every cc recipient of vMsg
                     end if
-                    if vFromAddr is not "" then
-                        set vKnown to false
-                        repeat with a in accounts
-                            repeat with e in (email addresses of a)
-                                if (e as text) is vFromAddr then set vKnown to true
-                            end repeat
-                        end repeat
-                        if not vKnown then error "no Mail account sends from " & vFromAddr
-                        set sender of vMsg to vFromAddr
-                    end if
+                    -- Anything that fails from here on closes the message unsaved, so Mail never files a
+                    -- half-built copy in Drafts. "not sent:" tells the caller nothing left the Mac.
+                    try
+                    if vFromAddr is not "" then set sender of vMsg to vFromAddr
                     repeat with r in my splitLines(vToList)
                         make new to recipient at end of to recipients of vMsg with properties {address:(r as text)}
                     end repeat
@@ -805,6 +816,12 @@ final class MailWriter {
                     repeat with f in my splitLines(vAttachList)
                         tell content of vMsg to make new attachment with properties {file name:(POSIX file (f as text))} at after last paragraph
                     end repeat
+                    on error vErr
+                        try
+                            close vMsg saving no
+                        end try
+                        error "not sent: " & vErr
+                    end try
                     if vSaveOnly is "1" then
                         save vMsg
                         close vMsg saving no
@@ -822,8 +839,13 @@ final class MailWriter {
                                            p("subject").first ?? "", p("body").first ?? "", p("attach").joined(separator: "\n"), saveOnly ? "1" : "0"],
                                   app: "Mail", timeout: 90)
         } catch {
-            Audit.write(saveOnly ? "mail save" : "mail send", ["draft": id, "to": to, "status": "failed", "error": AppleError.wrap(error).description])
-            throw error
+            let e = AppleError.wrap(error)
+            // Failed before Mail sent anything: the approved draft goes back, so it can be sent once fixed.
+            let neverSent = e.description.contains("not sent: ")
+            if neverSent { Draft.restore(d) }
+            Audit.write(saveOnly ? "mail save" : "mail send", ["draft": id, "to": to, "status": "failed", "error": e.description, "draftKept": neverSent])
+            throw neverSent ? AppleError.app(String(e.description[e.description.range(of: "not sent: ")!.upperBound...])
+                                             + ". Nothing was sent; draft \(id) is kept") : error
         }
         if saveOnly {
             Audit.write("mail save", ["draft": id, "to": to, "status": "saved"])
