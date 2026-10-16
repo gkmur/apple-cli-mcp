@@ -8,10 +8,19 @@ SYNC_TIMEOUT = 120
 steps = []
 
 
-def cli(*args):
-    """Runs apple-cli with --json. Returns (parsed output, milliseconds)."""
+def cli(*args, config=None):
+    """Runs apple-cli with --json. Returns (parsed output, milliseconds).
+    `config` is a dict written to a temp config file for this one call."""
+    env = dict(os.environ)
+    if config is not None:
+        import tempfile
+        f = tempfile.NamedTemporaryFile("w", suffix=".json", delete=False)
+        json.dump(config, f); f.close()
+        env["APPLE_CLI_CONFIG"] = f.name
     t = time.perf_counter()
-    p = subprocess.run([BIN, *args, "--json"], capture_output=True, text=True, timeout=90)
+    p = subprocess.run([BIN, *args, "--json"], capture_output=True, text=True, timeout=90, env=env)
+    if config is not None:
+        os.unlink(env["APPLE_CLI_CONFIG"])
     ms = (time.perf_counter() - t) * 1000
     out = json.loads(p.stdout) if p.stdout.strip() else {"error": {"code": "no_output", "message": p.stderr.strip()}}
     return out, ms
@@ -49,3 +58,12 @@ def poll(fn, timeout):
             return v
         time.sleep(1)
     return None
+
+
+def user_config():
+    """The user's real config, so privacy tests start from their rules and add one."""
+    p = os.environ.get("APPLE_CLI_CONFIG", os.path.expanduser("~/.config/apple-cli/config.json"))
+    try:
+        return json.load(open(p))
+    except FileNotFoundError:
+        return {}

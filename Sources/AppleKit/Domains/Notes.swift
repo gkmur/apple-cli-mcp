@@ -328,16 +328,19 @@ final class NotesStore {
         }
     }
 
+    /// Hidden folders, and folders under a hidden parent, are dropped before matching and
+    /// get the same not_found as a folder that does not exist, so the error reveals nothing.
     func folderScriptID(named name: String) throws -> String {
-        if privacy.hidesContainer(name) { throw AppleError.hidden("folder \(name)") }
-        let rows = try db.query("""
+        let paths = try folderPaths()
+        let pks = try db.query("""
             SELECT Z_PK FROM ZICCLOUDSYNCINGOBJECT
             WHERE Z_ENT = ? AND IFNULL(ZMARKEDFORDELETION,0) = 0 AND IFNULL(ZFOLDERTYPE,0) = 0 AND ZTITLE2 = ? COLLATE NOCASE
-            """, [e("ICFolder"), name])
-        guard rows.count == 1, let pk = rows[0].int("Z_PK") else {
-            throw rows.isEmpty ? AppleError.notFound("folder \(name)") : AppleError.invalid("\(rows.count) folders are named \(name)")
+            """, [e("ICFolder"), name]).compactMap { $0.int("Z_PK") }
+            .filter { pk in !((paths[pk] ?? []) + [name]).contains(where: privacy.hidesContainer) }
+        guard pks.count == 1 else {
+            throw pks.isEmpty ? AppleError.notFound("folder \(name)") : AppleError.invalid("\(pks.count) folders are named \(name)")
         }
-        return "x-coredata://\(storeUUID)/ICFolder/p\(pk)"
+        return "x-coredata://\(storeUUID)/ICFolder/p\(pks[0])"
     }
 
     func trashFolderScriptID() throws -> String {

@@ -1,8 +1,8 @@
 # apple-cli
 
-Fast Apple Notes, Reminders, and Contacts for agents. One Swift binary is both the CLI and an MCP server. Design: [docs/architecture.md](docs/architecture.md).
+Fast Apple Notes, Reminders, Contacts, and Messages (read-only) for agents. One Swift binary is both the CLI and an MCP server. Design: [docs/architecture.md](docs/architecture.md).
 
-- Notes and Reminders reads go straight to the apps' SQLite stores, opened read-only (a locked file is copied first), 15-250 ms. Contacts reads go through the Contacts framework so linked cards merge correctly, 0.2-0.5 s.
+- Notes and Reminders reads go straight to the apps' SQLite stores, opened read-only (a locked file is copied first), 15-250 ms. Contacts reads go through the Contacts framework so linked cards merge correctly, 0.2-0.5 s. Messages reads `chat.db` directly and decodes `attributedBody`, 0.5-0.6 s with contact names (about 30 ms with `--no-names`).
 - Writes go through official routes only. Reminders use EventKit. Contacts use the Contacts framework. Notes uses AppleScript scoped to one note or folder ID, never a `whose` search. 0.1-0.8 s warm.
 - Nothing ever writes to the databases, so iCloud sync stays intact.
 
@@ -39,6 +39,11 @@ apple-cli contacts duplicates
 apple-cli contacts create [--first] [--last] [--org] [--email work=a@b.com,…] [--phone mobile=+1…] [--birthday YYYY-MM-DD] [--group NAME]
 apple-cli contacts update <id> [--first …] [--add-email …] [--remove-email …] [--add-phone …] [--remove-phone …]
 apple-cli contacts delete <id>                  CLI only
+apple-cli messages chats [--limit N] [--no-names]
+apple-cli messages read <chat> [--limit N | --all] [--since WHEN] [--before WHEN]
+apple-cli messages search <query> [--chat …] [--from name|phone|email|me] [--since WHEN]
+apple-cli messages unread [--since WHEN]
+apple-cli messages stats
 apple-cli doctor                                permissions, store files, schema, speed per app
 apple-cli mcp                                   MCP server on stdio
 ```
@@ -54,12 +59,14 @@ The MCP server exposes the same commands as tools (`notes_search`, `contacts_rea
 - A note Notes has not downloaded from iCloud yet lists with no title, and `read` says so. Open it once in Notes to fetch it.
 - If Apple changes a database layout in an OS update, reads fail with `schema_changed` instead of returning wrong data. Run `apple-cli doctor`.
 - A contact's `synced` is true once iCloud's CardDAV server has accepted the card, and null for linked people.
+- `messages read` takes a chat ID, a group name, a contact name, a phone number, or an email. `--since` and `--before` take `YYYY-MM-DD [HH:MM]`, `today`, `yesterday`, or `7d`/`12h`/`30m` ago.
+- Messages is read-only. Reactions fold into the message they react to. Attachments come back with their file path.
 
 ## Privacy
 
 `~/.config/apple-cli/config.json` is created on first run. Notes whose title matches `excludeTitlePatterns`, notes in `excludeFolders`, notes in `excludeNoteIDs`, and every password-protected note are dropped before any command sees them. They never print, search skips them, and `read` or `append` on one fails with "hidden by privacy config". The defaults hide credential-looking titles plus journal and therapy notes.
 
-`reminders` has `defaultList` (`Reminders`), `defaultTime` (`09:00`), and `excludeLists`. `contacts` has `excludeNamePatterns`, `excludeGroups`, and `excludeContactIDs`. Each app's section is optional, and missing keys fall back to the defaults.
+`reminders` has `defaultList` (`Reminders`), `defaultTime` (`09:00`), and `excludeLists`. `contacts` has `excludeNamePatterns`, `excludeGroups`, and `excludeContactIDs`. `messages` has `excludeChats` (chat ID or group name), `excludeHandles` (phone or email), `excludeNamePatterns`, and `maskOneTimeCodes` (on by default, so verification-code texts read as `[one-time code hidden]` and stay out of search). A contact hidden in `contacts` is hidden in Messages too. If a privacy rule needs Contacts and Contacts cannot be read, Messages commands fail instead of showing unfiltered chats. Each app's section is optional, and missing keys fall back to the defaults.
 
 ## Test
 

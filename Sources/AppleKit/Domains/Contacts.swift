@@ -90,8 +90,9 @@ struct ContactInfo: Output {
 
 struct ContactList: Output {
     let contacts: [ContactInfo]
-    let hidden: Int
-    var text: String { contacts.map(\.line).joined(separator: "\n") + (hidden > 0 ? "\n\(hidden) contact(s) hidden by privacy config" : "") }
+    /// Set by list only. Search leaves it out so results cannot hint at hidden matches.
+    let hidden: Int?
+    var text: String { contacts.map(\.line).joined(separator: "\n") + ((hidden ?? 0) > 0 ? "\n\(hidden!) contact(s) hidden by privacy config" : "") }
 }
 
 struct ContactGroup: Encodable { let id: String; let name: String; let members: Int }
@@ -140,8 +141,8 @@ private func contactsCommands(_ ctx: Context) -> [Command] {[
     },
     Command(["contacts", "search"], .read, "Search names, nicknames, organizations, emails, and phone numbers.",
             [Param("query", required: true, positional: true, "Text, email, or phone digits"), Param("limit", .integer, "Max (default 20)")]) { a in
-        let (hits, hidden) = try ContactsStore(ctx).search(try a.require("query"))
-        return ContactList(contacts: hits.prefix(a.int("limit", 20)).map { contactInfo($0) }, hidden: hidden)
+        let hits = try ContactsStore(ctx).search(try a.require("query"))
+        return ContactList(contacts: hits.prefix(a.int("limit", 20)).map { contactInfo($0) }, hidden: nil)
     },
     Command(["contacts", "read"], .read, "Read one person with every field, groups, and sync state.",
             [Param("id", required: true, positional: true, "Contact ID")]) { a in
@@ -304,18 +305,26 @@ final class ContactsStore {
         let s = try ctx.settings(ContactsSettings.self)
         privacy = try PrivacyFilter(titlePatterns: s.excludeNamePatterns, containers: [], ids: s.excludeContactIDs)
         hiddenGroups = s.excludeGroups
+        hiddenByGroup = try Self.members(of: s.excludeGroups, in: store)
     }
 
-    /// IDs in excluded groups. Empty (and free) when no group is excluded.
-    private lazy var hiddenByGroup: Set<String> = {
-        guard !hiddenGroups.isEmpty else { return [] }
-        let wanted = Set(hiddenGroups.map { $0.lowercased() })
-        let gs = ((try? store.groups(matching: nil)) ?? []).filter { wanted.contains($0.name.lowercased()) }
-        return Set(gs.flatMap { g in
-            ((try? store.unifiedContacts(matching: CNContact.predicateForContactsInGroup(withIdentifier: g.identifier),
-                                         keysToFetch: [CNContactIdentifierKey as CNKeyDescriptor])) ?? []).map(\.identifier)
-        })
-    }()
+    /// IDs in excluded groups, computed up front. Any framework error fails the command
+    /// instead of returning unfiltered contacts. Empty (and free) when no group is excluded.
+    private let hiddenByGroup: Set<String>
+
+    private static func members(of groups: [String], in store: CNContactStore) throws -> Set<String> {
+        guard !groups.isEmpty else { return [] }
+        let wanted = Set(groups.map { $0.lowercased() })
+        return try withDeadline(10, "reading excluded groups") {
+            var ids = Set<String>()
+            for g in try store.groups(matching: nil) where wanted.contains(g.name.lowercased()) {
+                let members = try store.unifiedContacts(matching: CNContact.predicateForContactsInGroup(withIdentifier: g.identifier),
+                                                        keysToFetch: [CNContactIdentifierKey as CNKeyDescriptor])
+                ids.formUnion(members.map(\.identifier))
+            }
+            return ids
+        }
+    }
 
     private func hides(_ c: CNContact) -> Bool {
         privacy.hides(title: CNContactFormatter.string(from: c, style: .fullName) ?? c.organizationName, containers: [], id: c.identifier)
@@ -338,7 +347,8 @@ final class ContactsStore {
 
     /// Fast path first: Apple's indexed name, email, and phone lookups (about 20 ms).
     /// Falls back to one full pass only when they find nothing (organization or partial matches).
-    func search(_ query: String) throws -> (people: [CNContact], hidden: Int) {
+    /// Returns no hidden count: a count that depends on the query would reveal whether a hidden person matches.
+    func search(_ query: String) throws -> [CNContact] {
         let q = query.lowercased()
         let digits = q.filter(\.isNumber)
         var preds = [CNContact.predicateForContacts(matchingName: query)]
@@ -350,17 +360,14 @@ final class ContactsStore {
             for c in hits where seen.insert(c.identifier).inserted { raw.append(c) }
         }
         if raw.isEmpty {
-            let (people, hidden) = try all()
-            raw = people.filter { c in
+            return try all().people.filter { c in
                 let words = [c.givenName, c.middleName, c.familyName, c.nickname, c.organizationName,
                              CNContactFormatter.string(from: c, style: .fullName) ?? ""] + c.emailAddresses.map { $0.value as String }
                 if words.contains(where: { $0.lowercased().contains(q) }) { return true }
                 return digits.count >= 4 && c.phoneNumbers.contains { $0.value.stringValue.filter(\.isNumber).contains(digits) }
             }
-            return (raw, hidden)
         }
-        let visible = raw.filter { !hides($0) }
-        return (visible, raw.count - visible.count)
+        return raw.filter { !hides($0) }
     }
 
     func contact(_ id: String) throws -> CNContact {
@@ -448,6 +455,28 @@ final class ContactsStore {
         try withDeadline(10, "deleting the contact") { try self.store.execute(req) }
     }
 
+    /// One pass over every person, hidden ones included, for other apps (Messages) to use.
+    /// Returns display names keyed by normalized phone or email, and the handles of hidden people,
+    /// so an app can hide them too without ever printing them.
+    func handleIndex() throws -> (names: [String: String], hidden: Set<String>) {
+        try withDeadline(15, "indexing contacts") {
+            var names: [String: String] = [:], hidden = Set<String>()
+            let req = CNContactFetchRequest(keysToFetch: Self.lightKeys)
+            req.unifyResults = true
+            try self.store.enumerateContacts(with: req) { c, _ in
+                let raw = c.phoneNumbers.map { $0.value.stringValue } + c.emailAddresses.map { $0.value as String }
+                // Hidden people are matched in every form (raw, digits-only, normalized), so a short code
+                // or an odd format still hides them. Fail closed.
+                if self.hides(c) { hidden.formUnion(raw.flatMap(handleKeys)); return }
+                let handles = raw.compactMap(normalizeHandle)
+                let name = CNContactFormatter.string(from: c, style: .fullName) ?? c.organizationName
+                guard !name.isEmpty else { return }
+                for h in handles where names[h] == nil { names[h] = name }
+            }
+            return (names, hidden)
+        }
+    }
+
     /// True when a synced account's store holds this card with a CardDAV ETag, meaning the server
     /// accepted it. False when the card is there without one. Nil when no store holds it.
     func isSynced(_ id: String) -> Bool? {
@@ -462,5 +491,30 @@ final class ContactsStore {
             if row.str("ETAG") != nil { return true }
         }
         return seen ? false : nil
+    }
+}
+
+/// Every form a handle might be stored in: lowercased raw, digits only, and normalized.
+/// Privacy checks compare all of them so no format slips through.
+func handleKeys(_ raw: String) -> [String] {
+    let s = raw.trimmingCharacters(in: .whitespaces).lowercased()
+    let digits = s.filter(\.isNumber)
+    return Array(Set([s, s.contains("@") ? "" : digits, normalizeHandle(s) ?? ""].filter { !$0.isEmpty }))
+}
+
+/// Canonical form for matching a phone number or email across apps.
+/// Emails are lowercased. Phones keep their last 10 digits. Short codes (under 7 digits) return nil.
+func normalizeHandle(_ raw: String) -> String? {
+    let s = raw.trimmingCharacters(in: .whitespaces)
+    if s.contains("@") { return s.lowercased() }
+    let digits = s.filter(\.isNumber)
+    return digits.count >= 7 ? String(digits.suffix(10)) : nil
+}
+
+extension ContactsStore {
+    /// True when the user configured any Contacts privacy rule.
+    static func hasPrivacyRules(_ ctx: Context) throws -> Bool {
+        let s = try ctx.settings(ContactsSettings.self)
+        return !(s.excludeNamePatterns.isEmpty && s.excludeGroups.isEmpty && s.excludeContactIDs.isEmpty)
     }
 }
