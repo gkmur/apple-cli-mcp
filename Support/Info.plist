@@ -9,6 +9,7 @@
     <key>NSRemindersUsageDescription</key><string>apple-cli adds, completes, and deletes reminders for your agents.</string>
     <key>NSContactsUsageDescription</key><string>apple-cli reads and edits contacts for your agents.</string>
     <key>NSPhotoLibraryUsageDescription</key><string>apple-cli downloads originals and moves items to Recently Deleted when you ask.</string>
+    <key>NSCalendarsFullAccessUsageDescription</key><string>apple-cli reads and adds calendar events for your agents.</string>
     <key>NSAppleEventsUsageDescription</key><string>apple-cli creates and appends notes through Notes.app.</string>
 </dict>
 </plist>

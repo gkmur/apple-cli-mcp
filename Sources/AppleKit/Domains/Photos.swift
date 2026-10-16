@@ -367,13 +367,24 @@ final class PhotosWriter {
     /// resolving symlinks, so an agent cannot write into ~/Library, dotfiles, or elsewhere.
     static func destination(_ raw: String, agent: Bool) throws -> URL {
         guard agent else { return URL(fileURLWithPath: (raw as NSString).expandingTildeInPath).standardizedFileURL }
+        // One plain folder name only: no separators, no "..", no leading dot.
+        let name = raw.trimmingCharacters(in: .whitespaces)
+        guard !name.isEmpty, !name.contains("/"), !name.contains(":"), name != "..", !name.hasPrefix(".") else {
+            throw AppleError.refused("over MCP, to must be a single folder name; files go to \(agentRoot)/<name>")
+        }
+        let fm = FileManager.default
         let root = URL(fileURLWithPath: agentRoot)
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        let rootReal = root.resolvingSymlinksInPath().standardizedFileURL
-        let name = raw.hasPrefix(agentRoot) ? String(raw.dropFirst(agentRoot.count)) : raw
-        let dest = rootReal.appendingPathComponent(name).standardizedFileURL
+        try fm.createDirectory(at: root, withIntermediateDirectories: true)
+        let dest = root.appendingPathComponent(name)
+        // Refuse an existing symlink at the name (attributesOfItem does not follow the last component).
+        if let type = (try? fm.attributesOfItem(atPath: dest.path))?[.type] as? FileAttributeType, type == .typeSymbolicLink {
+            throw AppleError.refused("\(dest.path) is a symlink")
+        }
+        if !fm.fileExists(atPath: dest.path) { try fm.createDirectory(at: dest, withIntermediateDirectories: false) }
+        // Re-check after creation, on real (resolved) paths that now exist.
+        let rootReal = root.resolvingSymlinksInPath().standardizedFileURL.path
         let destReal = dest.resolvingSymlinksInPath().standardizedFileURL
-        guard destReal.path == rootReal.path || destReal.path.hasPrefix(rootReal.path + "/") else {
+        guard destReal.deletingLastPathComponent().path == rootReal else {
             throw AppleError.refused("over MCP, downloads must stay inside \(agentRoot)")
         }
         return destReal
