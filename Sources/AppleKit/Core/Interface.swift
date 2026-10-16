@@ -300,10 +300,9 @@ enum HTTPServer {
             done(equalTimingSafe(auth, "Bearer " + token) ? .agent : nil, 401)
         }
         if let access {
-            io.async { access.refreshKeys {} }
-            // Every connection here comes from cloudflared on 127.0.0.1, so its per-address cap is this listener's
-            // whole cap. Half the shared pool, so it can never crowd out the tailnet listener.
-            try listen(host: "127.0.0.1", port: access.port, perIP: maxUnauthed / 2, feed: feed,
+            access.refreshKeys {}
+            // Every connection here comes from cloudflared on 127.0.0.1, so the per-address cap is the whole cap.
+            try listen(host: "127.0.0.1", port: access.port, perIP: maxUnauthed, feed: feed,
                        name: "MCP for Cloudflare Access on http://127.0.0.1:\(access.port)/mcp, \(mode)") { head, done in
                 // Access also lets in browsers holding its login cookie, so a page on another site could post here
                 // in your name. MCP clients send no Origin and always send JSON; a browser form can do neither.
@@ -340,10 +339,8 @@ enum HTTPServer {
                 }
             }
             conn.start(queue: io)
-            // Only slow headers are cut off. A signature check that waits on a key fetch has its own 10-second bound.
-            io.asyncAfter(deadline: .now() + headDeadline) { if !slot.headDone { conn.cancel() } }
+            io.asyncAfter(deadline: .now() + headDeadline) { if !slot.authed { conn.cancel() } }
             readHead(conn, Data()) { head, rest in
-                slot.headDone = true
                 guard let head else { return respond(conn, 400, Data("bad request".utf8)) }
                 guard head.path == "/mcp" else { return respond(conn, 404, Data()) }
                 guard head.method == "POST" else { return respond(conn, 405, Data(), extra: ["Allow": "POST"]) }
@@ -412,7 +409,7 @@ enum HTTPServer {
                 if let cn = claims["common_name"] as? String, !cn.isEmpty { return done(.service(cn)) }
                 done(nil)
             }
-            if keys[kid] == nil, waiters != nil || Date().timeIntervalSince(lastFetch) > 60 { refreshKeys(check) } else { check() }
+            if keys[kid] == nil, Date().timeIntervalSince(lastFetch) > 60 { refreshKeys(check) } else { check() }
         }
 
         /// Fetches the team's signing certificates. Callers that arrive while a fetch runs wait for it.
@@ -462,7 +459,7 @@ enum HTTPServer {
     /// Tools running now, counted from accept to return. Only touched on io.
     nonisolated(unsafe) static var runningTools = 0
     static let maxRunningTools = 8
-    final class Slot: @unchecked Sendable { var released = false; var authed = false; var headDone = false; var readDone = false }  // only touched on io
+    final class Slot: @unchecked Sendable { var released = false; var authed = false; var readDone = false }  // only touched on io
 
     struct Head { let method: String; let path: String; let headers: [String: String] }
 
