@@ -152,11 +152,19 @@ final class SafariStore {
 
     /// History items with any visit whose title matches an exclude pattern. Aggregate
     /// commands (domains, visited) read no titles, so they check this set instead.
-    private lazy var itemsHiddenByTitle: Set<Int> = {
-        guard !patterns.patterns.isEmpty else { return [] }
-        let rows = (try? db.query("SELECT DISTINCT history_item, title FROM history_visits WHERE title IS NOT NULL AND title != ''")) ?? []
-        return Set(rows.compactMap { r in r.str("title").flatMap { patterns.hidesTitle($0) ? r.int("history_item") : nil } })
-    }()
+    private var titleHiddenCache: Set<Int>?
+    /// Throws if the lookup fails, so a privacy check never passes on an empty set.
+    private func itemsHiddenByTitle() throws -> Set<Int> {
+        if let c = titleHiddenCache { return c }
+        var out = Set<Int>()
+        if !patterns.patterns.isEmpty {
+            for r in try db.query("SELECT DISTINCT history_item, title FROM history_visits WHERE title IS NOT NULL AND title != ''") {
+                if let t = r.str("title"), patterns.hidesTitle(t), let id = r.int("history_item") { out.insert(id) }
+            }
+        }
+        titleHiddenCache = out
+        return out
+    }
 
     /// Registrable-ish domain: drop a leading "www." only, so subdomains stay distinct.
     static func domain(_ url: String) -> String {
@@ -192,11 +200,12 @@ final class SafariStore {
 
     func domains(since: Date, limit: Int) throws -> [DomainRow] {
         var agg: [String: (visits: Int, pages: Set<String>, last: Date?)] = [:]
+        let hiddenItems = try itemsHiddenByTitle()
         for r in try db.query("""
             SELECT i.id, i.url, v.visit_time FROM history_visits v JOIN history_items i ON i.id = v.history_item
             WHERE v.visit_time >= ? AND v.load_successful = 1
             """, [since.timeIntervalSinceReferenceDate]) {
-            guard let url = r.str("url"), !hides(url: url, title: nil), !itemsHiddenByTitle.contains(r.int("id") ?? -1) else { continue }
+            guard let url = r.str("url"), !hides(url: url, title: nil), !hiddenItems.contains(r.int("id") ?? -1) else { continue }
             let d = Self.domain(url)
             guard !d.isEmpty else { continue }
             var e = agg[d] ?? (0, [], nil)
@@ -213,6 +222,7 @@ final class SafariStore {
         let isURL = t.contains("/") || t.hasPrefix("http")
         let host = isURL ? Self.host(t.hasPrefix("http") ? t : "https://" + t) : t
         if hides(url: isURL ? target : "https://" + host, title: nil) { throw AppleError.hidden("\(target)") }
+        let hiddenItems = try itemsHiddenByTitle()
         let rows = try db.query("""
             SELECT i.id, i.url, MIN(v.visit_time) AS A, MAX(v.visit_time) AS Z, COUNT(*) AS N
             FROM history_visits v JOIN history_items i ON i.id = v.history_item GROUP BY i.id
@@ -222,7 +232,7 @@ final class SafariStore {
             if isURL { return u.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: "/")) == (t.hasPrefix("http") ? t : "https://" + t).trimmingCharacters(in: CharacterSet(charactersIn: "/")) || u.lowercased() == t }
             let h = Self.host(u)
             return h == host || h.hasSuffix("." + host)
-        }.filter { !hides(url: $0.str("url") ?? "", title: nil) && !itemsHiddenByTitle.contains($0.int("id") ?? -1) }
+        }.filter { !hides(url: $0.str("url") ?? "", title: nil) && !hiddenItems.contains($0.int("id") ?? -1) }
         let visits = hits.reduce(0) { $0 + ($1.int("N") ?? 0) }
         return VisitedResult(query: target, visited: !hits.isEmpty, visits: visits,
                              firstVisit: hits.compactMap { $0.date("A") }.min(), lastVisit: hits.compactMap { $0.date("Z") }.max(), urls: hits.count)
