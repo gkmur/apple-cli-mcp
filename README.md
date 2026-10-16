@@ -10,10 +10,10 @@ Fast access for agents to Apple Notes, Reminders, Contacts, Calendar, Photos, Me
 ## Install
 
 ```bash
-swift build -c release && rm -f ~/.local/bin/apple-cli && cp .build/release/apple-cli ~/.local/bin/
+Support/install.sh
 ```
 
-Remove the old file before copying. Copying over a running or cached binary in place makes macOS kill the new one (exit 137).
+This builds apple-cli, wraps it in `~/Applications/AppleCLI.app`, signs it with your Apple Development certificate, and links `~/.local/bin/apple-cli` to it. Photos download and delete run as AppleCLI, so macOS asks for Photos access in AppleCLI's name. Run `apple-cli photos access --request` to show that prompt.
 
 ## Commands
 

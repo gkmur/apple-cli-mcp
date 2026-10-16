@@ -267,3 +267,83 @@ func jsonObject(_ v: any Encodable) throws -> Any {
 func jsonString(_ v: any Encodable) -> String {
     (try? jsonEncoder().encode(v)).map { String(decoding: $0, as: UTF8.self) } ?? "{}"
 }
+
+// MARK: - Running as its own app
+
+/// macOS gives a child process the permissions of the app that launched it (Claude, Terminal).
+/// A launcher without a Photos usage string gets no Photos prompt; macOS kills the child instead.
+/// `OwnApp.run` reruns one command in a child that disclaims its launcher, so macOS asks for and
+/// remembers access under apple-cli's own signed identity (~/Applications/AppleCLI.app).
+enum OwnApp {
+    /// Set in the child, so it runs the command itself rather than spawning again.
+    static let marker = "APPLE_CLI_OWN_APP"
+    static var active: Bool { ProcessInfo.processInfo.environment[marker] != nil }
+
+    /// Runs `apple-cli <argv> --json` as its own app and decodes its output.
+    /// Errors from the child come back with their original code.
+    static func run<T: Decodable>(_ argv: [String], as: T.Type) async throws -> T {
+        guard let exe = Bundle.main.executablePath else { throw AppleError.app("cannot find the apple-cli executable") }
+        let (status, out) = try await Task.detached { try spawn(exe, argv + ["--json"]) }.value
+        let data = Data(out.utf8)
+        if let v = try? JSONDecoder().decode(T.self, from: data) { return v }
+        if let e = try? JSONDecoder().decode(ChildError.self, from: data) { throw AppleError.fromChild(code: e.error.code, message: e.error.message) }
+        if status.signaled {
+            throw AppleError.permission("macOS stopped apple-cli (signal \(status.code)) before it could ask for access. "
+                                        + "Run Support/install.sh so apple-cli runs from its signed app bundle")
+        }
+        throw AppleError.app("apple-cli child exited \(status.code) with no result")
+    }
+
+    private struct ChildError: Decodable { struct Body: Decodable { let code: String; let message: String }; let error: Body }
+
+    /// posix_spawn with the private responsibility_spawnattrs_setdisclaim, which makes the child
+    /// its own responsible process for privacy checks. Stdin is empty, stderr is shared, stdout is captured.
+    private static func spawn(_ exe: String, _ argv: [String]) throws -> ((signaled: Bool, code: Int32), String) {
+        typealias Disclaim = @convention(c) (UnsafeMutablePointer<posix_spawnattr_t?>, Int32) -> Int32
+        guard let sym = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "responsibility_spawnattrs_setdisclaim") else { // RTLD_DEFAULT
+            throw AppleError.app("this macOS has no responsibility_spawnattrs_setdisclaim")
+        }
+        var attr: posix_spawnattr_t?
+        posix_spawnattr_init(&attr); defer { posix_spawnattr_destroy(&attr) }
+        _ = unsafeBitCast(sym, to: Disclaim.self)(&attr, 1)
+
+        var fds: [Int32] = [0, 0]
+        guard pipe(&fds) == 0 else { throw AppleError.app("pipe failed") }
+        var actions: posix_spawn_file_actions_t?
+        posix_spawn_file_actions_init(&actions); defer { posix_spawn_file_actions_destroy(&actions) }
+        posix_spawn_file_actions_addopen(&actions, 0, "/dev/null", O_RDONLY, 0)
+        posix_spawn_file_actions_adddup2(&actions, fds[1], 1)
+        posix_spawn_file_actions_addclose(&actions, fds[0])
+        posix_spawn_file_actions_addclose(&actions, fds[1])
+
+        // Only plain settings cross over. Loader variables (DYLD_*) would let a caller run its own code under AppleCLI's grants.
+        let keep: Set<String> = ["HOME", "PATH", "USER", "LOGNAME", "TMPDIR", "LANG", "LC_ALL", "TZ"]
+        let env = ProcessInfo.processInfo.environment
+            .filter { keep.contains($0.key) || ($0.key.hasPrefix("APPLE_CLI_") && $0.key != marker) }
+            .merging([marker: "1"]) { $1 }.map { "\($0)=\($1)" }
+        let cArgs = ([exe] + argv).map { strdup($0) } + [nil]
+        let cEnv = env.map { strdup($0) } + [nil]
+        defer { (cArgs + cEnv).forEach { free($0) } }
+
+        var pid: pid_t = 0
+        let rc = posix_spawn(&pid, exe, &actions, &attr, cArgs, cEnv)
+        close(fds[1])
+        guard rc == 0 else { close(fds[0]); throw AppleError.app("could not start apple-cli as its own app: \(String(cString: strerror(rc)))") }
+        let out = FileHandle(fileDescriptor: fds[0], closeOnDealloc: true).readDataToEndOfFile()
+        var st: Int32 = 0
+        while waitpid(pid, &st, 0) == -1 && errno == EINTR {}
+        let signaled = (st & 0x7f) != 0 && (st & 0x7f) != 0x7f
+        return ((signaled, signaled ? st & 0x7f : (st >> 8) & 0xff), String(decoding: out, as: UTF8.self))
+    }
+}
+
+extension AppleError {
+    /// Rebuilds an error a child printed as JSON. The child's message already carries the prefix, so it is stripped.
+    static func fromChild(code: String, message: String) -> AppleError {
+        let makers: [(String) -> AppleError] = [AppleError.database, AppleError.notFound, AppleError.invalid, AppleError.hidden, AppleError.refused,
+                                                AppleError.app, AppleError.permission, AppleError.schemaChanged, AppleError.timeout]
+        guard let make = makers.first(where: { $0("").code == code }) else { return .app(message) }
+        let prefix = make("").description
+        return make(message.hasPrefix(prefix) ? String(message.dropFirst(prefix.count)) : message)
+    }
+}

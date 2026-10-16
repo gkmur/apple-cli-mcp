@@ -5,7 +5,7 @@ import Foundation
 /// Every app apple-cli knows. Adding an app = one folder under Domains/ plus one line here.
 let allDomains: [Domain] = [notesDomain, remindersDomain, contactsDomain, messagesDomain, photosDomain, calendarDomain, safariDomain, mailDomain, voiceMemosDomain, shortcutsDomain, callsDomain, musicDomain]
 
-public let version = "0.11.0"
+public let version = "0.12.0"
 
 final class Registry {
     let context: Context

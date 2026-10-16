@@ -34,11 +34,13 @@ let photosDomain = Domain(name: "photos", defaults: PhotosSettings.defaults, com
         out.append(Check(domain: "photos", name: "library", ok: false, detail: e.description,
                          fix: e.code == "permission" ? "System Settings > Privacy & Security > Full Disk Access" : nil))
     }
-    let st = PHPhotoLibrary.authorizationStatus(for: .readWrite)
-    out.append(Check(domain: "photos", name: "photokit", ok: st == .authorized || st == .notDetermined,
-                     detail: st == .authorized ? "full access granted (download and delete work)" :
-                        st == .notDetermined ? "not asked yet. The first download or delete prompts." : "access is \(st.rawValue)",
-                     fix: st == .authorized || st == .notDetermined ? nil : "System Settings > Privacy & Security > Photos"))
+    do {
+        let a = try await PhotoAccess.check(request: false)
+        out.append(Check(domain: "photos", name: "photokit", ok: a.status == "authorized" || a.status == "not_determined",
+                         detail: a.text, fix: a.status == "authorized" || a.status == "not_determined" ? nil : "System Settings > Privacy & Security > Photos > AppleCLI"))
+    } catch {
+        out.append(Check(domain: "photos", name: "photokit", ok: false, detail: AppleError.wrap(error).description, fix: "Run Support/install.sh"))
+    }
     return out
 })
 
@@ -101,7 +103,7 @@ struct AlbumList: Output {
     var text: String { albums.map { "\($0.name)  (\($0.items))" }.joined(separator: "\n") }
 }
 
-struct DownloadResult: Output {
+struct DownloadResult: Output, Decodable {
     let folder: String
     let saved: [String]
     let skipped: [String]
@@ -113,7 +115,7 @@ struct DownloadResult: Output {
     }
 }
 
-struct DeleteResult: Output {
+struct DeleteResult: Output, Decodable {
     let deleted: [String]
     var text: String { "moved \(deleted.count) item(s) to Recently Deleted" }
 }
@@ -150,6 +152,10 @@ private func photosCommands(_ ctx: Context) -> [Command] {
         Command(["photos", "albums"], .read, "Your albums with item counts.") { _ in
             AlbumList(albums: try PhotosStore(ctx).albums())
         },
+        Command(["photos", "access"], .read, "Whether apple-cli itself has Photos full access, which download and delete need. --request asks macOS to show the prompt.",
+                [Param("request", .boolean, "Show the Photos permission prompt if apple-cli has not been asked yet")]) { a in
+            try await PhotoAccess.check(request: a.bool("request"))
+        },
         Command(["photos", "download"], .write, "Download full-size originals (from iCloud if needed) into a folder. Refuses if it would leave too little free disk space.",
                 [Param("ids", required: true, positional: true, "Item IDs, space or comma separated"),
                  Param("to", required: true, "Destination folder, created if missing. Over MCP it is a folder name under ~/Downloads/apple-cli")]) { a in
@@ -157,6 +163,9 @@ private func photosCommands(_ ctx: Context) -> [Command] {
             // Privacy check first: a hidden or missing ID fails before PhotoKit is ever asked for access.
             let items = try PhotosStore(ctx).resolve(ids)
             let to = try PhotosWriter.destination(try a.require("to"), agent: a.viaMCP)
+            if !OwnApp.active {
+                return try await OwnApp.run(["photos", "download", items.map(\.id).joined(separator: ","), "--to", to.path], as: DownloadResult.self)
+            }
             let floor = try ctx.settings(PhotosSettings.self).minFreeGBAfterDownload
             return try await PhotosWriter().download(items, to: to, minFreeGB: floor)
         },
@@ -164,6 +173,7 @@ private func photosCommands(_ ctx: Context) -> [Command] {
                 [Param("ids", required: true, positional: true, "Item IDs, space or comma separated")]) { a in
             let ids = try a.require("ids").split(whereSeparator: { $0 == "," || $0 == " " }).map(String.init)
             let items = try PhotosStore(ctx).resolve(ids)
+            if !OwnApp.active { return try await OwnApp.run(["photos", "delete", items.map(\.id).joined(separator: ",")], as: DeleteResult.self) }
             FileHandle.standardError.write(Data(("About to move to Recently Deleted:\n" + items.map { "  " + $0.line }.joined(separator: "\n")
                                                  + "\nmacOS will ask you to confirm.\n").utf8))
             return DeleteResult(deleted: try await PhotosWriter().delete(items))
@@ -336,6 +346,35 @@ final class PhotosStore {
         let missing = Set(clean).subtracting(found.map(\.id))
         if !missing.isEmpty { throw AppleError.notFound("photo \(missing.sorted().joined(separator: ", "))") }
         return found
+    }
+}
+
+// MARK: - Access
+
+/// Photos access belongs to apple-cli's own app identity, so a process started by another app
+/// asks a child running as AppleCLI (see OwnApp).
+struct PhotoAccess: Output, Decodable {
+    let status: String
+    var text: String {
+        switch status {
+        case "authorized": return "full access granted to AppleCLI (download and delete work)"
+        case "not_determined": return "not asked yet. `apple-cli photos access --request` or the first download shows the prompt."
+        default: return "AppleCLI has \(status) access; download and delete need full access"
+        }
+    }
+
+    static func check(request: Bool) async throws -> PhotoAccess {
+        guard OwnApp.active else { return try await OwnApp.run(["photos", "access"] + (request ? ["--request"] : []), as: PhotoAccess.self) }
+        var st = PHPhotoLibrary.authorizationStatus(for: .readWrite)
+        if request && st == .notDetermined { st = await PHPhotoLibrary.requestAuthorization(for: .readWrite) }
+        switch st {
+        case .authorized: return PhotoAccess(status: "authorized")
+        case .notDetermined: return PhotoAccess(status: "not_determined")
+        case .limited: return PhotoAccess(status: "limited")
+        case .denied: return PhotoAccess(status: "denied")
+        case .restricted: return PhotoAccess(status: "restricted")
+        @unknown default: return PhotoAccess(status: "unknown")
+        }
     }
 }
 

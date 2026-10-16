@@ -136,6 +136,8 @@ Every writer returns the new item's stable ID, so a read can follow immediately.
 
 This becomes the first thing an agent runs when a command fails.
 
+Most permissions belong to the app that launched apple-cli (Claude, Terminal). Photos is the exception. A launcher without a Photos usage string gets no prompt, and macOS kills the process. So `photos download`, `photos delete`, and `photos access` rerun in a child that disclaims its launcher (`OwnApp` in `Runtime.swift`), and macOS records the grant for the signed bundle `~/Applications/AppleCLI.app`. `Support/install.sh` builds and signs that bundle.
+
 ### Testing
 
 The single `scripts/e2e.py` becomes a runner with one module per domain (`scripts/e2e/notes.py`, `contacts.py`, ...). Each module runs create, read back, wait for sync, and clean up. The runner writes one report per run, and `--domain contacts` runs one. No unit tests, as per your rules.
@@ -164,7 +166,7 @@ The single `scripts/e2e.py` becomes a runner with one module per domain (`script
 - **A long-running MCP process cache.** If agents call `contacts search` in tight loops, keep the `CNContactStore` warm in the MCP process (the CLI stays stateless).
 - **Write queue or offline retry.** Only needed if a sync check starts timing out regularly.
 - **Calendar and Messages read backends**, decided in their teardowns.
-- **Signing and notarizing** the binary if macOS starts to re-prompt for permissions after rebuilds. Today they're tied to the parent app.
+- **Moving every permission to AppleCLI** (Full Disk Access, Contacts, Calendars, Reminders) so it works the same from any launcher. Today only Photos is, because only Photos fails under Claude.
 
 ## 7. Migration from v0.1
 

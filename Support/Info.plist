@@ -3,8 +3,11 @@
 <plist version="1.0">
 <dict>
     <key>CFBundleIdentifier</key><string>io.gkmur.apple-cli</string>
-    <key>CFBundleName</key><string>apple-cli</string>
-    <key>CFBundleShortVersionString</key><string>0.1.0</string>
+    <key>CFBundleName</key><string>AppleCLI</string>
+    <key>CFBundleExecutable</key><string>apple-cli</string>
+    <key>CFBundlePackageType</key><string>APPL</string>
+    <key>LSUIElement</key><true/>
+    <key>CFBundleShortVersionString</key><string>0.12.0</string>
     <key>NSRemindersFullAccessUsageDescription</key><string>apple-cli adds, completes, and deletes reminders for your agents.</string>
     <key>NSRemindersUsageDescription</key><string>apple-cli adds, completes, and deletes reminders for your agents.</string>
     <key>NSContactsUsageDescription</key><string>apple-cli reads and edits contacts for your agents.</string>
