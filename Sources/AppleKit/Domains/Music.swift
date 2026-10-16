@@ -118,36 +118,36 @@ enum MusicStore {
     static func control(_ action: String, _ arg: String, _ playlist: String) throws -> String {
         try Osascript.run("""
             on run argv
-                set {act, q, pl} to argv
+                set {vAct, vQ, vPl} to argv
                 tell application "Music"
-                    if act is "play" then
-                        if pl is not "" then
-                            play user playlist pl
-                            return pl
-                        else if q is not "" then
-                            set hits to search library playlist 1 for q
-                            if hits is {} then error "nothing in your library matches " & q
-                            play item 1 of hits
-                            return (name of item 1 of hits) & " - " & (artist of item 1 of hits)
+                    if vAct is "play" then
+                        if vPl is not "" then
+                            play user playlist vPl
+                            return vPl
+                        else if vQ is not "" then
+                            set vHits to search library playlist 1 for vQ
+                            if vHits is {} then error "nothing in your library matches " & vQ
+                            play item 1 of vHits
+                            return (name of item 1 of vHits) & " - " & (artist of item 1 of vHits)
                         else
                             play
                             return ""
                         end if
-                    else if act is "pause" then
+                    else if vAct is "pause" then
                         pause
-                    else if act is "resume" then
+                    else if vAct is "resume" then
                         play
-                    else if act is "next" then
+                    else if vAct is "next" then
                         next track
-                    else if act is "previous" then
+                    else if vAct is "previous" then
                         previous track
-                    else if act is "volume" then
-                        set sound volume to (q as integer)
-                    else if act is "add" then
-                        set hits to search library playlist 1 for q only songs
-                        if hits is {} then error "nothing in your library matches " & q
-                        duplicate (item 1 of hits) to user playlist pl
-                        return (name of item 1 of hits) & " - " & (artist of item 1 of hits)
+                    else if vAct is "volume" then
+                        set sound volume to (vQ as integer)
+                    else if vAct is "add" then
+                        set vHits to search library playlist 1 for vQ only songs
+                        if vHits is {} then error "nothing in your library matches " & vQ
+                        duplicate (item 1 of vHits) to user playlist vPl
+                        return (name of item 1 of vHits) & " - " & (artist of item 1 of vHits)
                     end if
                     return ""
                 end tell

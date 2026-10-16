@@ -6,7 +6,7 @@ import Network
 /// Every app apple-cli knows. Adding an app = one folder under Domains/ plus one line here.
 let allDomains: [Domain] = [notesDomain, remindersDomain, contactsDomain, messagesDomain, photosDomain, calendarDomain, safariDomain, mailDomain, voiceMemosDomain, shortcutsDomain, callsDomain, musicDomain, acrossDomain]
 
-public let version = "0.13.0"
+public let version = "0.14.0"
 
 final class Registry {
     let context: Context
@@ -198,7 +198,7 @@ final class MCPServer {
 // MARK: - MCP over HTTP (streamable HTTP transport, JSON responses only)
 
 /// One endpoint, POST /mcp, behind a bearer token read from a mode-600 file. Read-only unless
-/// started with --writes. Requests are answered one at a time, in arrival order.
+/// started with --writes. Requests run side by side, up to the authenticated-connection cap.
 enum HTTPServer {
     static let maxBody = 1 << 20
 
@@ -218,11 +218,16 @@ enum HTTPServer {
         let mode = writes ? "reads and writes" : "read-only"
         let mcp = MCPServer(registry: registry, allowWrites: writes)
         let (queue, feed) = AsyncStream.makeStream(of: (Data, NWConnection).self)
+        // Each request runs on its own, so one slow tool (an app launching, a prompt on screen) never holds up
+        // the rest. The authenticated-connection cap bounds how many run at once.
         Task {
             for await (body, conn) in queue {
-                let t = Date()
-                if let reply = await mcp.handle(body) { respond(conn, 200, reply) } else { respond(conn, 202, Data()) }
-                log("\(describe(body)) \(Int(Date().timeIntervalSince(t) * 1000)) ms")
+                Task.detached {
+                    let t = Date()
+                    defer { io.async { runningTools -= 1 } }
+                    if let reply = await mcp.handle(body) { respond(conn, 200, reply) } else { respond(conn, 202, Data()) }
+                    log("\(describe(body)) \(Int(Date().timeIntervalSince(t) * 1000)) ms")
+                }
             }
         }
 
@@ -270,6 +275,9 @@ enum HTTPServer {
                 readBody(conn, rest, length: length) { body in
                     guard let body else { return respond(conn, 400, Data("bad request".utf8)) }
                     slot.readDone = true
+                    // Running tools are capped on their own: a client that hangs up does not free its tool's slot.
+                    guard runningTools < maxRunningTools else { return respond(conn, 503, Data()) }
+                    runningTools += 1
                     feed.yield((body, conn))
                 }
             }
@@ -300,6 +308,9 @@ enum HTTPServer {
     static let maxUnauthed = 32, maxUnauthedPerIP = 4, maxAuthed = 16, headDeadline = 2.0, bodyDeadline = 10.0, maxHead = 16384
     nonisolated(unsafe) static var openUnauthed = 0, openAuthed = 0
     nonisolated(unsafe) static var unauthedByIP: [String: Int] = [:]
+    /// Tools running now, counted from accept to return. Only touched on io.
+    nonisolated(unsafe) static var runningTools = 0
+    static let maxRunningTools = 8
     final class Slot: @unchecked Sendable { var released = false; var authed = false; var readDone = false }  // only touched on io
 
     struct Head { let method: String; let path: String; let headers: [String: String] }

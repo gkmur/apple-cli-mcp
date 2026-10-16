@@ -96,12 +96,12 @@ private func safariCommands(_ ctx: Context) -> [Command] {
             guard let u = URL(string: url), ["http", "https"].contains(u.scheme?.lowercased() ?? "") else { throw AppleError.invalid("url must start with http:// or https://") }
             _ = try Osascript.run("""
                 on run argv
-                    set {u, t} to argv
+                    set {vU, vT} to argv
                     tell application "Safari"
-                        if t is "" then
-                            add reading list item u
+                        if vT is "" then
+                            add reading list item vU
                         else
-                            add reading list item u with title t
+                            add reading list item vU with title vT
                         end if
                     end tell
                 end run

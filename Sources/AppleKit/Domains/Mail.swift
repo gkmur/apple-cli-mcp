@@ -655,7 +655,9 @@ struct MIMEText {
 // MARK: - Writing (Mail.app scripting, one message at a time by its Envelope Index ID)
 
 /// Envelope Index ROWIDs are the IDs Mail's scripting uses, so every reference below is direct:
-/// `message id N of mailbox "path" of account id "UUID"`, never a `whose` search, which hangs.
+/// `«class mssg» id N of mailbox "path" of account id "UUID"`, never a `whose` search, which hangs.
+/// The raw class code is needed because Mail also has a `message id` property (the Message-ID
+/// header), and `message id N` does not compile.
 struct MailChange: Encodable { let id: String; let ok: Bool; let detail: String }
 struct MailChanges: Output {
     let action: String
@@ -706,6 +708,10 @@ final class MailWriter {
             if r.message.body == "[one-time code hidden]" || r.message.preview == "[one-time code hidden]" {
                 throw AppleError.refused("message \(rid) is masked as a one-time code or sign-in email; it cannot be replied to or forwarded from apple-cli")
             }
+            // Without the body, there is no way to know it holds no code, so the answer is no (fail closed).
+            if store.settings.maskOneTimeCodes && !r.message.bodyAvailable {
+                throw AppleError.refused("Mail has not downloaded message \(rid)'s body, so it cannot be checked for one-time codes. Open it in Mail once, then try again")
+            }
             mode = a.string("forward") != nil ? "forward" : (a.bool("reply-all") ? "replyall" : "reply")
             quoted = r.message
             refParts = [r.account, r.box, r.rowid]
@@ -753,57 +759,57 @@ final class MailWriter {
         let p = { (k: String) in d.payload[k] ?? [] }
         let ref = p("ref") + ["", "", ""]
         let script = """
-            on splitLines(t)
-                if t is "" then return {}
+            on splitLines(vT)
+                if vT is "" then return {}
                 set AppleScript's text item delimiters to linefeed
-                set out to text items of t
+                set out to text items of vT
                 set AppleScript's text item delimiters to ""
                 return out
             end splitLines
             on run argv
-                set {mode, acct, boxPath, rowid, fromAddr, toList, ccList, bccList, subj, bodyText, attachList, saveOnly} to argv
+                set {vMode, vAcct, vBoxPath, vRowid, vFromAddr, vToList, vCcList, vBccList, vSubj, vBodyText, vAttachList, vSaveOnly} to argv
                 tell application "Mail"
-                    if mode is "new" then
-                        set msg to make new outgoing message with properties {subject:subj, content:bodyText, visible:false}
+                    if vMode is "new" then
+                        set vMsg to make new outgoing message with properties {subject:vSubj, content:vBodyText, visible:false}
                     else
-                        set orig to message id (rowid as integer) of mailbox boxPath of account id acct
-                        if mode is "forward" then
-                            set msg to forward orig opening window false
+                        set vOrig to «class mssg» id (vRowid as integer) of mailbox vBoxPath of account id vAcct
+                        if vMode is "forward" then
+                            set vMsg to forward vOrig opening window false
                         else
-                            set msg to reply orig opening window false reply to all (mode is "replyall")
+                            set vMsg to reply vOrig opening window false reply to all (vMode is "replyall")
                         end if
-                        set subject of msg to subj
-                        set content of msg to bodyText & return & return & (content of msg)
-                        delete every to recipient of msg
-                        delete every cc recipient of msg
+                        set subject of vMsg to vSubj
+                        set content of vMsg to vBodyText & return & return & (content of vMsg)
+                        delete every to recipient of vMsg
+                        delete every cc recipient of vMsg
                     end if
-                    if fromAddr is not "" then
-                        set known to false
+                    if vFromAddr is not "" then
+                        set vKnown to false
                         repeat with a in accounts
                             repeat with e in (email addresses of a)
-                                if (e as text) is fromAddr then set known to true
+                                if (e as text) is vFromAddr then set vKnown to true
                             end repeat
                         end repeat
-                        if not known then error "no Mail account sends from " & fromAddr
-                        set sender of msg to fromAddr
+                        if not vKnown then error "no Mail account sends from " & vFromAddr
+                        set sender of vMsg to vFromAddr
                     end if
-                    repeat with r in my splitLines(toList)
-                        make new to recipient at end of to recipients of msg with properties {address:(r as text)}
+                    repeat with r in my splitLines(vToList)
+                        make new to recipient at end of to recipients of vMsg with properties {address:(r as text)}
                     end repeat
-                    repeat with r in my splitLines(ccList)
-                        make new cc recipient at end of cc recipients of msg with properties {address:(r as text)}
+                    repeat with r in my splitLines(vCcList)
+                        make new cc recipient at end of cc recipients of vMsg with properties {address:(r as text)}
                     end repeat
-                    repeat with r in my splitLines(bccList)
-                        make new bcc recipient at end of bcc recipients of msg with properties {address:(r as text)}
+                    repeat with r in my splitLines(vBccList)
+                        make new bcc recipient at end of bcc recipients of vMsg with properties {address:(r as text)}
                     end repeat
-                    repeat with f in my splitLines(attachList)
-                        tell content of msg to make new attachment with properties {file name:(POSIX file (f as text))} at after last paragraph
+                    repeat with f in my splitLines(vAttachList)
+                        tell content of vMsg to make new attachment with properties {file name:(POSIX file (f as text))} at after last paragraph
                     end repeat
-                    if saveOnly is "1" then
-                        save msg
-                        close msg saving no
+                    if vSaveOnly is "1" then
+                        save vMsg
+                        close vMsg saving no
                     else
-                        send msg
+                        send vMsg
                     end if
                 end tell
             end run
@@ -869,15 +875,15 @@ final class MailWriter {
                 }
                 _ = try Osascript.run("""
                     on run argv
-                        set {act, acct, boxPath, rowid, dest} to argv
+                        set {vAct, vAcct, vBoxPath, vRowid, vDest} to argv
                         tell application "Mail"
-                            set m to message id (rowid as integer) of mailbox boxPath of account id acct
-                            if act is "read" then set read status of m to true
-                            if act is "unread" then set read status of m to false
-                            if act is "flag" then set flagged status of m to true
-                            if act is "unflag" then set flagged status of m to false
-                            if act is "move" or act is "archive" then move m to mailbox dest of account id acct
-                            if act is "trash" then delete m
+                            set m to «class mssg» id (vRowid as integer) of mailbox vBoxPath of account id vAcct
+                            if vAct is "read" then set read status of m to true
+                            if vAct is "unread" then set read status of m to false
+                            if vAct is "flag" then set flagged status of m to true
+                            if vAct is "unflag" then set flagged status of m to false
+                            if vAct is "move" or vAct is "archive" then move m to mailbox vDest of account id vAcct
+                            if vAct is "trash" then delete m
                         end tell
                     end run
                     """, [action, r.account, r.box, r.rowid, target], app: "Mail", timeout: 30)
@@ -916,20 +922,20 @@ final class MailWriter {
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         let out = try Osascript.run("""
             on run argv
-                set {acct, boxPath, rowid, dir} to argv
-                set saved to {}
+                set {vAcct, vBoxPath, vRowid, vDir} to argv
+                set vSaved to {}
                 tell application "Mail"
-                    set m to message id (rowid as integer) of mailbox boxPath of account id acct
-                    repeat with att in (mail attachments of m)
-                        set n to name of att
-                        if n does not start with "." and n does not contain "/" and n does not contain linefeed and n does not contain return and n does not contain ":" then
-                            save att in POSIX file (dir & "/" & n)
-                            set end of saved to n
+                    set m to «class mssg» id (vRowid as integer) of mailbox vBoxPath of account id vAcct
+                    repeat with vAtt in (mail attachments of m)
+                        set vN to name of vAtt
+                        if vN does not start with "." and vN does not contain "/" and vN does not contain linefeed and vN does not contain return and vN does not contain ":" then
+                            save vAtt in POSIX file (vDir & "/" & vN)
+                            set end of vSaved to vN
                         end if
                     end repeat
                 end tell
                 set AppleScript's text item delimiters to linefeed
-                return saved as text
+                return vSaved as text
             end run
             """, [r.account, r.box, r.rowid, dir.path], app: "Mail", timeout: 120)
         Audit.write("mail attachments", ["id": id, "folder": dir.path, "count": out.isEmpty ? 0 : out.split(separator: "\n").count])

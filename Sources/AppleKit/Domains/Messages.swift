@@ -633,19 +633,19 @@ final class MessageSender {
         // The text and target travel as argv, never spliced into the script.
         let script = """
             on run argv
-                set {kind, target, svcName, msg, filePath} to argv
+                set {refKind, destID, svcName, msgText, filePath} to argv
                 tell application "Messages"
-                    if kind is "chat" then
-                        set dest to chat id target
+                    if refKind is "chat" then
+                        set dest to chat id destID
                     else
                         if svcName is "SMS" then
                             set svc to first account whose service type is SMS
                         else
                             set svc to first account whose service type is iMessage
                         end if
-                        set dest to participant target of svc
+                        set dest to participant destID of svc
                     end if
-                    if msg is not "" then send msg to dest
+                    if msgText is not "" then send msgText to dest
                     if filePath is not "" then send (POSIX file filePath) to dest
                 end tell
             end run

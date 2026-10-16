@@ -75,6 +75,18 @@ apple-cli shortcuts run <name or id> [--input TEXT]   CLI only
 apple-cli calls recent | missed [--since …] [--no-names]
 apple-cli calls with <name, phone, or email>
 apple-cli music recent | top | search <query> | playlists | now   [--launch]
+apple-cli notes move <id> --folder NAME | rename <id> --title T | new-folder <name>
+apple-cli reminders update <id> [--title --notes --priority --list] | uncomplete <id>
+apple-cli calendar update <id> [--title --start --end --duration --location --notes --alert --calendar] [--all]
+apple-cli contacts group <id> [--add GROUP] [--remove GROUP] | new-group <name>
+apple-cli messages draft <to> --text T [--file PATH] [--sms]      then: messages send <draft-id>
+apple-cli mail draft --to A,B --body T [--subject --cc --bcc --from --attach P,Q --reply-to ID --reply-all --forward ID]
+apple-cli mail send <draft-id> [--save-only]
+apple-cli mail modify <ids> --action archive|trash|move|read|unread|flag|unflag [--mailbox PATH]
+apple-cli mail attachments <id> --to FOLDER
+apple-cli photos organize <ids> --action add-to-album|remove-from-album|favorite|unfavorite [--album NAME]
+apple-cli music play [query] [--playlist NAME] | control pause|resume|next|previous|volume [--level N] | add-to-playlist <query> --playlist NAME
+apple-cli safari read-later <url> [--title T]
 apple-cli person <name, contact ID, phone, or email> [--limit N]
                                                 contact card, texts, mail from them, calls, shared events, last contact
 apple-cli today                                 calendar, reminders due, unread texts, missed calls, unread mail
@@ -91,6 +103,16 @@ apple-cli serve --host IP [--port 7790] [--token-file PATH] [--writes]
 `--at` takes `YYYY-MM-DD [HH:MM]`, `today|tomorrow [HH:MM]`, or `+30m`, `+2h`, `+1d`. With no `--at`, the reminder is set for tomorrow at the default time. Every reminder gets a due date and an alarm at that moment, so it always pings.
 
 The MCP server exposes the same commands as tools (`notes_search`, `contacts_read`, `doctor`, ...), with read-only hints. Commands marked CLI only are destructive and are never MCP tools. Errors come back as `{"error": {"code", "message"}}`, with codes `not_found`, `hidden`, `refused`, `permission`, `schema_changed`, `timeout`, `invalid`, `app_error`, and `database`.
+
+## Sending
+
+Texts and email go out in two steps. `messages draft` and `mail draft` resolve the recipient and save a draft (`d_1a2b3c4d`) that shows exactly what will be sent. `messages send <id>` or `mail send <id>` sends that draft unchanged. A draft sends once and expires after an hour. Agents must show the draft to you and wait for your yes before sending; the draft ID makes sure what you approved is what leaves.
+
+- A text goes to an existing chat (a group, or anyone you have texted) or starts a new one with a phone or email, over iMessage or `--sms`. `send` then watches `chat.db` and reports `delivered`, `sent`, `sending`, or `failed`.
+- At most 30 sends an hour (`send.sendsPerHour` in config), counted in `~/Library/Logs/apple-cli/sends.log` under a lock.
+- Every write, send included, adds a line to `~/Library/Logs/apple-cli/audit.log`: time, command, recipient, status. Never message text.
+- Over MCP, attachments must already be in `~/Downloads/apple-cli`, so an agent cannot mail out arbitrary files.
+- Safari has no supported way to add bookmarks, so only the Reading List is writable. Voice Memos and call history have no write routes.
 
 ## Behavior to know
 

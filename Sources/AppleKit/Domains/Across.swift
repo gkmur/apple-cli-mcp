@@ -320,13 +320,22 @@ private func permissions(request: Bool) async -> PermissionReport {
 private func row(_ name: String, _ status: String, pane: String) -> PermissionRow {
     PermissionRow(name: name, status: status, fix: status == "granted" ? nil
                   : status == "not_asked" ? "run apple-cli permissions --request in a logged-in session"
+                  : status == "prompt_waiting" ? "a permission prompt for AppleCLI is on this Mac's screen; answer it"
                   : "System Settings > Privacy & Security > \(pane): turn on AppleCLI")
 }
 
 /// Apple Events permission for one app. Asking needs the app running, so a request launches it hidden first.
 private func automation(_ bundleID: String, request: Bool) -> String {
     let target = NSAppleEventDescriptor(bundleIdentifier: bundleID)
-    func check() -> OSStatus { AEDeterminePermissionToAutomateTarget(target.aeDesc, typeWildCard, typeWildCard, request) }
+    // While any AppleCLI prompt is on screen, macOS holds every other permission check until it is answered.
+    // A plain check gives up after 5 seconds instead of hanging; a request waits for the click.
+    func check() -> OSStatus {
+        if request { return AEDeterminePermissionToAutomateTarget(target.aeDesc, typeWildCard, typeWildCard, true) }
+        let done = DispatchSemaphore(value: 0)
+        nonisolated(unsafe) var st = OSStatus(errAEEventWouldRequireUserConsent)
+        DispatchQueue.global().async { st = AEDeterminePermissionToAutomateTarget(target.aeDesc, typeWildCard, typeWildCard, false); done.signal() }
+        return done.wait(timeout: .now() + 5) == .success ? st : OSStatus(1)  // 1: still waiting on a prompt
+    }
     var st = check()
     if st == OSStatus(procNotFound) && request {
         _ = try? runProcess("/usr/bin/open", ["-gj", "-b", bundleID], timeout: 15, what: bundleID)
@@ -338,6 +347,7 @@ private func automation(_ bundleID: String, request: Bool) -> String {
     case OSStatus(errAEEventWouldRequireUserConsent): return "not_asked"
     case OSStatus(errAEEventNotPermitted): return "denied"
     case OSStatus(procNotFound): return "not_asked"
+    case 1: return "prompt_waiting"
     default: return "unknown (\(st))"
     }
 }
