@@ -258,7 +258,7 @@ final class MessagesStore {
     let db: SQLiteReader
     let settings: MessagesSettings
     let namePatterns: PrivacyFilter
-    let codePatterns: [NSRegularExpression]
+    let codePatterns: PrivacyFilter
     let excludeChats: Set<String>
     let excludeHandles: Set<String>
     private var names: [String: String] = [:]
@@ -270,9 +270,7 @@ final class MessagesStore {
         try db.require(Self.schema)
         settings = try ctx.settings(MessagesSettings.self)
         namePatterns = try PrivacyFilter(titlePatterns: settings.excludeNamePatterns, containers: [], ids: [])
-        codePatterns = try settings.oneTimeCodePatterns.map {
-            do { return try NSRegularExpression(pattern: $0) } catch { throw AppleError.invalid("bad one-time code pattern \($0)") }
-        }
+        codePatterns = try PrivacyFilter(titlePatterns: settings.oneTimeCodePatterns, containers: [], ids: [])
         excludeChats = Set(settings.excludeChats.map { $0.lowercased() })
         excludeHandles = Set(settings.excludeHandles.flatMap(handleKeys))
 
@@ -380,7 +378,7 @@ final class MessagesStore {
     }
 
     func isOneTimeCode(_ t: String) -> Bool {
-        settings.maskOneTimeCodes && codePatterns.contains { $0.firstMatch(in: t, range: NSRange(t.startIndex..., in: t)) != nil }
+        settings.maskOneTimeCodes && codePatterns.hidesTitle(t)
     }
 
     private func bodyText(_ r: [String: Any]) -> String? {

@@ -3,9 +3,9 @@ import Foundation
 // One registry drives the CLI, `--json`, and the MCP server, so they cannot drift.
 
 /// Every app apple-cli knows. Adding an app = one folder under Domains/ plus one line here.
-let allDomains: [Domain] = [notesDomain, remindersDomain, contactsDomain, messagesDomain, photosDomain, calendarDomain, safariDomain, mailDomain, voiceMemosDomain, shortcutsDomain, callsDomain]
+let allDomains: [Domain] = [notesDomain, remindersDomain, contactsDomain, messagesDomain, photosDomain, calendarDomain, safariDomain, mailDomain, voiceMemosDomain, shortcutsDomain, callsDomain, musicDomain]
 
-public let version = "0.10.0"
+public let version = "0.11.0"
 
 final class Registry {
     let context: Context
@@ -66,6 +66,8 @@ struct ErrorOutput: Encodable {
 
 public enum CLI {
     public static func main(_ argv: [String]) async -> Int32 {
+        // A child process or MCP client that goes away must surface as a write error, not kill apple-cli.
+        signal(SIGPIPE, SIG_IGN)
         let reg = Registry()
         var args = Array(argv.dropFirst())
         let json = args.contains("--json")
@@ -173,7 +175,8 @@ final class MCPServer {
         var props: [String: Any] = [:]
         for p in c.params { props[p.name] = ["type": p.kind.rawValue, "description": p.help] }
         return ["name": c.toolName, "description": c.help,
-                "annotations": ["readOnlyHint": c.effect == .read, "destructiveHint": false, "openWorldHint": false],
+                // Writes can remove data (contacts_update drops emails, notes_append rewrites the body), so every write is flagged.
+                "annotations": ["readOnlyHint": c.effect == .read, "destructiveHint": c.effect != .read, "openWorldHint": false],
                 "inputSchema": ["type": "object", "properties": props, "required": c.params.filter(\.required).map(\.name)]]
     }
 }

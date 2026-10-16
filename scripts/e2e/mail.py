@@ -1,6 +1,6 @@
 """Mail (read-only): counts and order against the index, bodies against Python's own MIME parser, search, privacy."""
 from common import cli, err, step, check, user_config
-import copy, email, email.policy, glob, html, os, re, sqlite3
+import copy, email, email.policy, glob, os, re, sqlite3, unicodedata, urllib.parse
 
 APP = "mail"
 DB = os.path.expanduser("~/Library/Mail/V10/MailData/Envelope Index")
@@ -25,8 +25,12 @@ def listing():
     check(out.get("indexedThrough"), "no indexedThrough")
     state["msgs"] = m
     mb, _ = cli("mail", "mailboxes")
-    total = db().execute("SELECT SUM(total_count) FROM mailboxes WHERE total_count > 0").fetchone()[0]
-    check(sum(x["messages"] for x in mb.get("mailboxes", [])) == total, "mailbox totals differ from the index")
+    # Each listed mailbox must match its row in the index (mailboxes hidden by config are simply absent).
+    rows = {}
+    for url, tc in db().execute("SELECT url, total_count FROM mailboxes WHERE total_count > 0"):
+        path = urllib.parse.unquote(urllib.parse.urlparse(url).path).strip("/")
+        rows.setdefault(path, []).append(tc)
+    check(all(x["messages"] in rows.get(x["mailbox"], []) for x in mb.get("mailboxes", [])), "mailbox totals differ from the index")
     return f"{len(m)} messages newest first; {len(mb['mailboxes'])} mailboxes match the index; newest {newest}", ms
 
 
@@ -76,7 +80,22 @@ def search():
     word = max(re.findall(r"[A-Za-z]{5,}", pick["subject"]) or [pick["subject"][:8]], key=len)
     out, ms = cli("mail", "search", word, "--limit", "500")
     check(any(x["id"] == pick["id"] for x in out.get("messages", [])), "search missed a message whose subject has the word")
-    return f"search found the message by a subject word ({len(out['messages'])} hits)", ms
+    up, _ = cli("mail", "search", word.upper(), "--limit", "500")
+    check(any(x["id"] == pick["id"] for x in up.get("messages", [])), "search is case-sensitive")
+    # Accent folding: a visible subject with an accented letter must be found by its plain-ASCII spelling.
+    rows = db().execute("""SELECT m.ROWID, s.subject FROM messages m JOIN subjects s ON s.ROWID = m.subject
+        WHERE m.deleted = 0 AND s.subject GLOB '*[à-ÿ]*' ORDER BY m.date_received DESC LIMIT 50""").fetchall()
+    accented = None
+    for rid, subj in rows:
+        words = [w for w in re.findall(r"\w*[à-ÿ]\w*", subj) if len(w) >= 4]
+        r, _ = cli("mail", "read", str(rid), "--max-chars", "0")
+        if words and "error" not in r and r.get("subject") != "[one-time code hidden]":
+            accented = (str(rid), words[0]); break
+    if accented:
+        plain = "".join(c for c in unicodedata.normalize("NFD", accented[1]) if not unicodedata.combining(c))
+        a, _ = cli("mail", "search", plain, "--limit", "100000")
+        check(any(x["id"] == accented[0] for x in a.get("messages", [])), "accent-insensitive search missed the accented subject")
+    return f"search found the message by a subject word ({len(out['messages'])} hits), any case{', and without accents' if accented else ''}", ms
 
 
 def privacy():

@@ -44,6 +44,18 @@ public final class SQLiteReader {
             throw AppleError.database(msg)
         }
         sqlite3_busy_timeout(db, 250)
+        // fold(text): lowercased with accents removed, so SQL can match the way Swift's
+        // caseInsensitive + diacriticInsensitive search does. NULL stays NULL.
+        let fold: @convention(c) (OpaquePointer?, Int32, UnsafeMutablePointer<OpaquePointer?>?) -> Void = { ctx, argc, argv in
+            guard argc == 1, let v = argv?[0], sqlite3_value_type(v) != SQLITE_NULL, let c = sqlite3_value_text(v) else {
+                sqlite3_result_null(ctx); return
+            }
+            let s = String(cString: c).folding(options: [.caseInsensitive, .diacriticInsensitive], locale: nil)
+            sqlite3_result_text(ctx, s, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self))
+        }
+        guard sqlite3_create_function_v2(db, "fold", 1, SQLITE_UTF8 | SQLITE_DETERMINISTIC, nil, fold, nil, nil, nil) == SQLITE_OK else {
+            throw AppleError.database("could not register fold(): \(String(cString: sqlite3_errmsg(db)))")
+        }
     }
 
     private func openCopy() throws {
@@ -135,29 +147,44 @@ extension Dictionary where Key == String, Value == Any {
     }
 }
 
+/// Runs a program with a deadline. Output goes to temp files, not pipes, so a child
+/// that writes more than a pipe buffer never blocks waiting to be read.
+func runProcess(_ exe: String, _ args: [String], stdin: Data? = nil, timeout: TimeInterval, what: String) throws -> (status: Int32, out: String, err: String) {
+    let fm = FileManager.default
+    let dir = fm.temporaryDirectory.appendingPathComponent("apple-cli-proc-\(UUID().uuidString)")
+    try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+    defer { try? fm.removeItem(at: dir) }
+    let outURL = dir.appendingPathComponent("out"), errURL = dir.appendingPathComponent("err")
+    fm.createFile(atPath: outURL.path, contents: nil); fm.createFile(atPath: errURL.path, contents: nil)
+    let outH = try FileHandle(forWritingTo: outURL), errH = try FileHandle(forWritingTo: errURL)
+    defer { try? outH.close(); try? errH.close() }
+    let p = Process()
+    p.executableURL = URL(fileURLWithPath: exe)
+    p.arguments = args
+    p.standardOutput = outH; p.standardError = errH
+    let inPipe = Pipe()
+    p.standardInput = stdin == nil ? FileHandle.nullDevice : inPipe
+    try p.run()
+    if let stdin {
+        try? inPipe.fileHandleForWriting.write(contentsOf: stdin)
+        try? inPipe.fileHandleForWriting.close()
+    }
+    let deadline = Date().addingTimeInterval(timeout)
+    while p.isRunning && Date() < deadline { usleep(5_000) }
+    if p.isRunning { p.terminate(); throw AppleError.timeout("\(what) did not finish within \(Int(timeout))s") }
+    let read = { (u: URL) in String(decoding: (try? Data(contentsOf: u)) ?? Data(), as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines) }
+    return (p.terminationStatus, read(outURL), read(errURL))
+}
+
 /// Runs AppleScript from stdin with arguments passed as argv, so user text
 /// is never spliced into script source. Every call has a deadline.
 enum Osascript {
     static func run(_ script: String, _ args: [String], app: String, timeout: TimeInterval = 15) throws -> String {
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
-        p.arguments = ["-"] + args
-        let inPipe = Pipe(), outPipe = Pipe(), errPipe = Pipe()
-        p.standardInput = inPipe; p.standardOutput = outPipe; p.standardError = errPipe
-        try p.run()
-        inPipe.fileHandleForWriting.write(Data(script.utf8))
-        try inPipe.fileHandleForWriting.close()
-        let deadline = Date().addingTimeInterval(timeout)
-        while p.isRunning && Date() < deadline { usleep(5_000) }
-        if p.isRunning { p.terminate(); throw AppleError.timeout("\(app) did not answer within \(Int(timeout))s") }
-        let out = String(decoding: outPipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        guard p.terminationStatus == 0 else {
-            let err = String(decoding: errPipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            if err.contains("-1743") { throw AppleError.permission("allow control of \(app) in System Settings > Privacy & Security > Automation") }
-            throw AppleError.app("\(app): \(err)")
+        let r = try runProcess("/usr/bin/osascript", ["-"] + args, stdin: Data(script.utf8), timeout: timeout, what: app)
+        guard r.status == 0 else {
+            if r.err.contains("-1743") { throw AppleError.permission("allow control of \(app) in System Settings > Privacy & Security > Automation") }
+            throw AppleError.app("\(app): \(r.err)")
         }
-        return out
+        return r.out
     }
 }

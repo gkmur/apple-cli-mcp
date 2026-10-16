@@ -157,20 +157,8 @@ final class ShortcutsStore {
             try Data(input.utf8).write(to: inFile)
             args += ["--input-path", inFile.path]
         }
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: "/usr/bin/shortcuts")
-        p.arguments = args
-        let err = Pipe()
-        p.standardError = err
-        p.standardOutput = FileHandle.nullDevice
-        try p.run()
-        let deadline = Date().addingTimeInterval(timeout)
-        while p.isRunning && Date() < deadline { usleep(20_000) }
-        if p.isRunning { p.terminate(); throw AppleError.timeout("\(m.info.name) did not finish within \(Int(timeout))s") }
-        guard p.terminationStatus == 0 else {
-            let msg = String(decoding: err.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
-            throw AppleError.app("shortcuts: \(msg.isEmpty ? "exit \(p.terminationStatus)" : msg)")
-        }
+        let r = try runProcess("/usr/bin/shortcuts", args, timeout: timeout, what: m.info.name)
+        guard r.status == 0 else { throw AppleError.app("shortcuts: \(r.err.isEmpty ? "exit \(r.status)" : r.err)") }
         let out = (try? String(contentsOf: outFile, encoding: .utf8))?.trimmingCharacters(in: .whitespacesAndNewlines)
         return ShortcutRun(shortcut: m.info.name, output: out?.isEmpty == false ? out : nil)
     }

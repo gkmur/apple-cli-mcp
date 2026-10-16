@@ -145,7 +145,7 @@ The single `scripts/e2e.py` becomes a runner with one module per domain (`script
 - **Load** is one person, so there's no horizontal scaling. The real limit is per-call latency. Measured warm: SQLite reads 15–35 ms, Contacts reads 60–350 ms, EventKit writes 100–200 ms, AppleScript writes 210–330 ms.
 - **Contention.** The apps own their stores and hold write locks. A read uses `mode=ro` with a 250 ms busy timeout, then falls back to reading a copy of the files.
 - **Hangs.** Every subprocess and framework call has a deadline. `osascript` gets 15 s, and the framework calls run under a watchdog.
-- **Observability.** `APPLE_CLI_DEBUG=1` prints per-step timings to stderr. `doctor` is the health check. An optional JSONL log of command, duration and error code (no content) under `~/.local/state/apple-cli/` would show which commands agents actually use.
+- **Observability.** `APPLE_CLI_DEBUG=1` prints per-step timings to stderr. `doctor` is the health check. An optional JSONL log of command, duration and error code (no content) under `~/.local/state/apple-cli/` would show which commands agents use.
 
 ## 5. Trade-offs
 

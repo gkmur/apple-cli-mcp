@@ -86,7 +86,9 @@ private func callsCommands(_ ctx: Context) -> [Command] {
 final class CallsStore {
     static let path = NSHomeDirectory() + "/Library/Application Support/CallHistoryDB/CallHistory.storedata"
     static let schema: [String: [String]] = [
-        "ZCALLRECORD": ["ZDATE", "ZDURATION", "ZADDRESS", "ZNAME", "ZORIGINATED", "ZANSWERED", "ZCALLTYPE", "ZUNIQUE_ID", "ZORIGINATINGDEVICENAME"],
+        "ZCALLRECORD": ["Z_PK", "ZDATE", "ZDURATION", "ZADDRESS", "ZNAME", "ZORIGINATED", "ZANSWERED", "ZCALLTYPE", "ZUNIQUE_ID", "ZORIGINATINGDEVICENAME"],
+        "Z_2REMOTEPARTICIPANTHANDLES": ["Z_2REMOTEPARTICIPANTCALLS", "Z_4REMOTEPARTICIPANTHANDLES"],
+        "ZHANDLE": ["Z_PK", "ZVALUE", "ZNORMALIZEDVALUE"],
     ]
 
     let db: SQLiteReader
@@ -115,8 +117,21 @@ final class CallsStore {
         }
     }
 
-    private func hides(handle: String?, callerName: String?) -> Bool {
-        if let h = handle {
+    /// Every participant handle per call (group FaceTime has more than ZADDRESS), in both stored forms.
+    private func participants() throws -> [Int: [String]] {
+        var out: [Int: [String]] = [:]
+        for r in try db.query("""
+            SELECT j.Z_2REMOTEPARTICIPANTCALLS AS CALL, h.ZVALUE AS V, h.ZNORMALIZEDVALUE AS N
+            FROM Z_2REMOTEPARTICIPANTHANDLES j JOIN ZHANDLE h ON h.Z_PK = j.Z_4REMOTEPARTICIPANTHANDLES
+            """) {
+            guard let c = r.int("CALL") else { continue }
+            out[c, default: []] += [r.str("V"), r.str("N")].compactMap { $0 }.filter { !$0.isEmpty }
+        }
+        return out
+    }
+
+    private func hides(handles: [String], callerName: String?) -> Bool {
+        for h in handles {
             if handleKeys(h).contains(where: { excludeHandles.contains($0) || hiddenHandles.contains($0) }) { return true }
             if let n = normalizeHandle(h).flatMap({ names[$0] }), namePatterns.hidesTitle(n) { return true }
         }
@@ -146,14 +161,15 @@ final class CallsStore {
             }
         }
         hiddenCount = 0
+        let others = try participants()
         var out: [CallInfo] = []
         for r in try db.query("""
-            SELECT ZUNIQUE_ID, ZDATE, ZDURATION, ZADDRESS, ZNAME, ZORIGINATED, ZANSWERED, ZCALLTYPE, ZORIGINATINGDEVICENAME
+            SELECT Z_PK, ZUNIQUE_ID, ZDATE, ZDURATION, ZADDRESS, ZNAME, ZORIGINATED, ZANSWERED, ZCALLTYPE, ZORIGINATINGDEVICENAME
             FROM ZCALLRECORD WHERE \(w.joined(separator: " AND ")) ORDER BY ZDATE DESC
             """, p) {
             let handle = r.str("ZADDRESS").flatMap { $0.isEmpty ? nil : $0 }
             let caller = r.str("ZNAME").flatMap { $0.isEmpty ? nil : $0 }
-            if hides(handle: handle, callerName: caller) { hiddenCount += 1; continue }
+            if hides(handles: [handle].compactMap { $0 } + (others[r.int("Z_PK") ?? -1] ?? []), callerName: caller) { hiddenCount += 1; continue }
             let contact = handle.flatMap(normalizeHandle).flatMap { names[$0] }
             if let targets {
                 let keys = Set(handle.map(handleKeys) ?? [])

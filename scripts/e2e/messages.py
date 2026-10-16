@@ -37,6 +37,7 @@ def chats():
     named = [x for x in c if any(p and not re.fullmatch(r"[+\d\s()@.\w-]*@?[\w.]*", p) or any(ch.isalpha() for ch in p) and "@" not in p for p in x["participants"])]
     check(named, "no participant resolved to a contact name")
     state["top"] = c[0]["id"]
+    state["chat_ids"] = [x["id"] for x in c[:15]]
     state["one_to_one"] = next((x for x in c if not x["group"]), None)
     return f"{len(c)} chats, {len(named)} with contact names, {out['hidden']} hidden", ms
 
@@ -47,15 +48,20 @@ def read():
     check(m, err(out) or "no messages")
     dates = [x["date"] for x in m if x.get("date")]
     check(dates == sorted(dates), "messages not in time order")
-    words = [w for x in m if x.get("text") and x["text"] != "[one-time code hidden]" and not OTP.search(x["text"])
-             for w in re.findall(r"[A-Za-z]{7,}", x["text"])]
-    check(words, "no searchable word in recent messages")
-    state["word"] = words[-1]
+    # The search word comes from the first recent chat that has one (a chat of short texts may not).
+    for cid in state["chat_ids"]:
+        msgs = m if cid == state["top"] else cli("messages", "read", cid, "--limit", "40")[0].get("messages", [])
+        words = [w for x in msgs if x.get("text") and x["text"] != "[one-time code hidden]" and not OTP.search(x["text"])
+                 for w in re.findall(r"[A-Za-z]{7,}", x["text"])]
+        if words:
+            state["word"], state["word_chat"] = words[-1], cid
+            break
+    check(state.get("word"), "no searchable word in the 15 most recent chats")
     return f"{len(m)} messages in time order", ms
 
 
 def search():
-    out, ms = cli("messages", "search", state["word"], "--chat", state["top"], "--limit", "50")
+    out, ms = cli("messages", "search", state["word"], "--chat", state["word_chat"], "--limit", "50")
     r = out.get("results", [])
     check(r and all(state["word"].lower() in (x.get("text") or "").lower() for x in r), err(out) or "search missed or returned non-matches")
     dates = [x["date"] for x in r]

@@ -1,8 +1,9 @@
 # apple-cli
 
-Fast Apple Notes, Reminders, Contacts, and Messages (read-only) for agents. One Swift binary is both the CLI and an MCP server. Design: [docs/architecture.md](docs/architecture.md).
+Fast access for agents to Apple Notes, Reminders, Contacts, Calendar, Photos, Messages, Mail, Safari, Voice Memos, Shortcuts, call history, and Music. One Swift binary is both the CLI and an MCP server. Design: [docs/architecture.md](docs/architecture.md).
 
 - Notes and Reminders reads go straight to the apps' SQLite stores, opened read-only (a locked file is copied first), 15-250 ms. Contacts reads go through the Contacts framework so linked cards merge correctly, 0.2-0.5 s. Messages reads `chat.db` directly and decodes `attributedBody`, 0.5-0.6 s with contact names (about 30 ms with `--no-names`).
+- Calendar uses EventKit for reads and writes. Photos reads `Photos.sqlite` read-only and downloads or deletes through PhotoKit. Mail, Safari, Voice Memos, Shortcuts, and call history read their stores directly, under 0.5 s for normal queries (`mail search --body` scans message files, about 2.5 s for 90 days).
 - Writes go through official routes only. Reminders use EventKit. Contacts use the Contacts framework. Notes uses AppleScript scoped to one note or folder ID, never a `whose` search. 0.1-0.8 s warm.
 - Nothing ever writes to the databases, so iCloud sync stays intact.
 
@@ -44,6 +45,27 @@ apple-cli messages read <chat> [--limit N | --all] [--since WHEN] [--before WHEN
 apple-cli messages search <query> [--chat …] [--from name|phone|email|me] [--since WHEN]
 apple-cli messages unread [--since WHEN]
 apple-cli messages stats
+apple-cli photos stats | storage [--by …] | top | videos | albums
+apple-cli photos list [--album …] [--since …] [--kind …]
+apple-cli photos download <ids> [--to …]
+apple-cli photos delete <ids>                   CLI only
+apple-cli calendar calendars | today
+apple-cli calendar agenda [--days N] [--from …] [--to …]
+apple-cli calendar search <query> [--since …] [--until …]
+apple-cli calendar add <title> [--start …] [--end … | --duration …] [--all-day] [--location …] [--alert …] [--calendar …]
+apple-cli calendar delete <id> [--all]          CLI only
+apple-cli safari history | search <query> | domains | visited <url or domain> | bookmarks | tabs
+apple-cli mail mailboxes
+apple-cli mail list [--mailbox …] [--account …] [--since …] [--unread] [--flagged]
+apple-cli mail search <query> [--from …] [--mailbox …] [--since …] [--body]
+apple-cli mail unread [--since …]
+apple-cli mail read <id> [--max-chars N]
+apple-cli voicememos list | read <id> | search <query>
+apple-cli shortcuts list | read <name or id>
+apple-cli shortcuts run <name or id> [--input TEXT]   CLI only
+apple-cli calls recent | missed [--since …] [--no-names]
+apple-cli calls with <name, phone, or email>
+apple-cli music recent | top | search <query> | playlists | now   [--launch]
 apple-cli doctor                                permissions, store files, schema, speed per app
 apple-cli mcp                                   MCP server on stdio
 ```
@@ -61,12 +83,17 @@ The MCP server exposes the same commands as tools (`notes_search`, `contacts_rea
 - A contact's `synced` is true once iCloud's CardDAV server has accepted the card, and null for linked people.
 - `messages read` takes a chat ID, a group name, a contact name, a phone number, or an email. `--since` and `--before` take `YYYY-MM-DD [HH:MM]`, `today`, `yesterday`, or `7d`/`12h`/`30m` ago.
 - Messages is read-only. Reactions fold into the message they react to. Attachments come back with their file path.
+- `calendar add` defaults to the one writable calendar whose source is iCloud. `--alert` replaces the calendar's default alerts.
+- Mail's index only updates while Mail.app runs, so every Mail listing reports `indexedThrough`. Bodies come from Mail's `.emlx` files; `bodyAvailable` is false when Mail has not downloaded one.
+- `shortcuts read` lists action identifiers only, never parameters, which can hold URLs and tokens.
+- Voice Memos transcripts come from inside each `.m4a`, split into timed sentences.
+- Music reads go through Music's scripting dictionary in bulk (about 0.3 s for the whole library). Commands refuse while Music is closed unless you pass `--launch`, since scripting opens it.
 
 ## Privacy
 
 `~/.config/apple-cli/config.json` is created on first run. Notes whose title matches `excludeTitlePatterns`, notes in `excludeFolders`, notes in `excludeNoteIDs`, and every password-protected note are dropped before any command sees them. They never print, search skips them, and `read` or `append` on one fails with "hidden by privacy config". The defaults hide credential-looking titles plus journal and therapy notes.
 
-`reminders` has `defaultList` (`Reminders`), `defaultTime` (`09:00`), and `excludeLists`. `contacts` has `excludeNamePatterns`, `excludeGroups`, and `excludeContactIDs`. `messages` has `excludeChats` (chat ID or group name), `excludeHandles` (phone or email), `excludeNamePatterns`, and `maskOneTimeCodes` (on by default, so verification-code texts read as `[one-time code hidden]` and stay out of search). A contact hidden in `contacts` is hidden in Messages too. If a privacy rule needs Contacts and Contacts cannot be read, Messages commands fail instead of showing unfiltered chats. Each app's section is optional, and missing keys fall back to the defaults.
+`reminders` has `defaultList` (`Reminders`), `defaultTime` (`09:00`), and `excludeLists`. `contacts` has `excludeNamePatterns`, `excludeGroups`, and `excludeContactIDs`. `messages` has `excludeChats` (chat ID or group name), `excludeHandles` (phone or email), `excludeNamePatterns`, and `maskOneTimeCodes` (on by default, so verification-code texts read as `[one-time code hidden]` and stay out of search). A contact hidden in `contacts` is hidden in Messages too. If a privacy rule needs Contacts and Contacts cannot be read, Messages commands fail instead of showing unfiltered chats. `calendar` has `excludeCalendars` and `excludeTitlePatterns`. `photos` has `includeHidden` and `excludeAlbums`. `safari` has `excludeDomains` and `excludePatterns`. `mail` has `excludeMailboxes`, `excludeAddresses` (address or domain), `excludeSubjectPatterns`, and `maskOneTimeCodes` (also masks sign-in and password-reset emails). `voicememos` has `excludeTitlePatterns` and `excludeIDs`. `shortcuts` has `excludeNamePatterns`. `calls` has `excludeHandles` and `excludeNamePatterns`. A contact hidden in `contacts` is hidden in Mail and call history too. Each app's section is optional, and missing keys fall back to the defaults.
 
 ## Test
 

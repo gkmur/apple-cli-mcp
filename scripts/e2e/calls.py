@@ -55,7 +55,26 @@ def privacy():
     return "excluded number gone from recent; calls with it refused", ms
 
 
+def group_privacy():
+    """A group call must hide when any participant, not only the first, is excluded."""
+    row = db().execute("""SELECT c.ZUNIQUE_ID, h.ZVALUE FROM ZCALLRECORD c
+        JOIN Z_2REMOTEPARTICIPANTHANDLES j ON j.Z_2REMOTEPARTICIPANTCALLS = c.Z_PK
+        JOIN ZHANDLE h ON h.Z_PK = j.Z_4REMOTEPARTICIPANTHANDLES
+        WHERE h.ZVALUE != c.ZADDRESS ORDER BY c.ZDATE DESC LIMIT 1""").fetchone()
+    if not row:
+        return "no group calls with extra participants to check", 0
+    cid, other = row
+    base, _ = cli("calls", "recent", "--since", "3650d", "--limit", "100000", "--no-names")
+    if not any(x["id"] == cid for x in base.get("calls", [])):
+        return "newest group call already hidden by config", 0
+    cfg = copy.deepcopy(user_config()); cfg.setdefault("calls", {})["excludeHandles"] = [other]
+    out, ms = cli("calls", "recent", "--since", "3650d", "--limit", "100000", "--no-names", config=cfg)
+    check(all(x["id"] != cid for x in out.get("calls", [])), "group call shown although a participant is excluded")
+    return "group call hidden when a non-primary participant is excluded", ms
+
+
 def run():
     if step(APP, "recent and missed match database", recent):
         if step(APP, "calls with one number", with_number):
             step(APP, "privacy: exclude number", privacy)
+    step(APP, "privacy: group call participant", group_privacy)

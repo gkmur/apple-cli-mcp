@@ -37,7 +37,8 @@ let mailDomain = Domain(name: "mail", defaults: MailSettings.defaults, commands:
         return [
             Check(domain: "mail", name: "store", ok: true,
                   detail: "\(n?.int("N") ?? 0) messages readable, schema matches, \(Int(Date().timeIntervalSince(t) * 1000)) ms", fix: nil),
-            Check(domain: "mail", name: "freshness", ok: age < 7,
+            // An old index is information, not a failure: the user may read mail elsewhere.
+            Check(domain: "mail", name: "freshness", ok: true,
                   detail: "newest message \(newest.map { localISO.string(from: $0) } ?? "none"). The index is only as fresh as Mail.app's last sync",
                   fix: age < 7 ? nil : "Open Mail so it syncs"),
         ]
@@ -129,7 +130,7 @@ private func mailCommands(_ ctx: Context) -> [Command] {
         Command(["mail", "list"], .read, "Recent messages, newest first. Skips junk and trash unless --mailbox names one.",
                 [mailbox, account, since, Param("unread", .boolean, "Only unread"), Param("flagged", .boolean, "Only flagged"), limit]) { a in
             let s = try MailStore(ctx)
-            return MailList(messages: try s.find(MailQuery(text: nil, from: a.string("from"), mailbox: a.string("mailbox"), account: a.string("account"),
+            return MailList(messages: try s.find(MailQuery(text: nil, from: nil, mailbox: a.string("mailbox"), account: a.string("account"),
                                                            since: try a.string("since").map(parseSince), unread: a.bool("unread"),
                                                            flagged: a.bool("flagged"), body: false), limit: a.int("limit", 20)),
                             indexedThrough: try s.newest())
@@ -194,7 +195,7 @@ final class MailStore {
     let db: SQLiteReader
     let settings: MailSettings
     let subjectFilter: PrivacyFilter
-    let codePatterns: [NSRegularExpression]
+    let codePatterns: PrivacyFilter
     let boxes: [Int: Box]
     /// Mailboxes hidden by config, and address rows hidden by config or by Contacts privacy rules.
     let hiddenBoxes: Set<Int>
@@ -206,9 +207,7 @@ final class MailStore {
         try db.require(Self.schema)
         settings = try ctx.settings(MailSettings.self)
         subjectFilter = try PrivacyFilter(titlePatterns: settings.excludeSubjectPatterns, containers: settings.excludeMailboxes, ids: [])
-        codePatterns = try settings.oneTimeCodePatterns.map {
-            do { return try NSRegularExpression(pattern: $0) } catch { throw AppleError.invalid("bad one-time code pattern \($0)") }
-        }
+        codePatterns = try PrivacyFilter(titlePatterns: settings.oneTimeCodePatterns, containers: [], ids: [])
 
         let names = Self.accountNames()
         var b: [Int: Box] = [:]
@@ -299,7 +298,7 @@ final class MailStore {
         """
 
     func isOneTimeCode(_ t: String) -> Bool {
-        settings.maskOneTimeCodes && codePatterns.contains { $0.firstMatch(in: t, range: NSRange(t.startIndex..., in: t)) != nil }
+        settings.maskOneTimeCodes && codePatterns.hidesTitle(t)
     }
 
     private func subject(_ r: [String: Any]) -> String { (r.str("prefix") ?? "") + (r.str("subject") ?? "") }
@@ -343,14 +342,16 @@ final class MailStore {
         if let s = q.since { w.append("m.date_received >= ?"); p.append(Int64(s.timeIntervalSince1970)) }
         if q.unread { w.append("m.read = 0") }
         if q.flagged { w.append("m.flagged = 1") }
-        if let f = q.from {
-            w.append("(a.address LIKE ? ESCAPE '\\' OR a.comment LIKE ? ESCAPE '\\')")
-            p += [Self.like(f), Self.like(f)]
-        }
-        // Header text matches in SQL. With --body, rows that miss the headers are kept for a body scan.
+        // Case- and accent-insensitive matching in SQL through fold(), so misses never leave SQLite.
+        // Body search keeps header misses for the body scan, so it only filters on --from here.
+        let containsFolded = { (col: String) in "instr(fold(\(col)), fold(?)) > 0" }
         if let t = q.text, !q.body {
-            w.append("(s.subject LIKE ? ESCAPE '\\' OR a.address LIKE ? ESCAPE '\\' OR a.comment LIKE ? ESCAPE '\\' OR su.summary LIKE ? ESCAPE '\\')")
-            p += Array(repeating: Self.like(t), count: 4)
+            w.append("(\(containsFolded("s.subject")) OR \(containsFolded("a.address")) OR \(containsFolded("a.comment")) OR \(containsFolded("su.summary")))")
+            p += Array(repeating: t, count: 4)
+        }
+        if let f = q.from {
+            w.append("(\(containsFolded("a.address")) OR \(containsFolded("a.comment")))")
+            p += [f, f]
         }
         let sql = "\(Self.select) WHERE \(w.joined(separator: " AND ")) ORDER BY m.date_received DESC"
         var out: [MailSummary] = []
@@ -362,6 +363,7 @@ final class MailStore {
             let rows = try db.query(sql + " LIMIT \(page) OFFSET \(offset)", p)
             if rows.isEmpty { break }
             offset += rows.count
+            // Text and --from already matched in SQL; only privacy rules run here.
             let visible = rows.filter { !hiddenRow($0) }
             // Rows whose headers miss the query get a body scan, in parallel (about 3 ms each).
             var bodyHit = [Int: Bool]()
@@ -387,9 +389,12 @@ final class MailStore {
                 let isCode = masked(r)
                 if let t = q.text {
                     if isCode { continue }
-                    let hay = [subject(r), r.str("address") ?? "", r.str("name") ?? "", r.str("summary") ?? ""]
-                    if !hay.contains(where: { $0.range(of: t, options: [.caseInsensitive, .diacriticInsensitive]) != nil }),
-                       bodyHit[r.int("id") ?? -1] != true { continue }
+                    // With --body, SQL kept header misses; keep them only if their body matched.
+                    if q.body {
+                        let hay = [subject(r), r.str("address") ?? "", r.str("name") ?? "", r.str("summary") ?? ""]
+                        if !hay.contains(where: { $0.range(of: t, options: [.caseInsensitive, .diacriticInsensitive]) != nil }),
+                           bodyHit[r.int("id") ?? -1] != true { continue }
+                    }
                 }
                 out.append(summary(r, masked: isCode))
                 if out.count >= limit { break }
@@ -398,13 +403,9 @@ final class MailStore {
         return out
     }
 
-    static func like(_ s: String) -> String {
-        "%" + s.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "%", with: "\\%").replacingOccurrences(of: "_", with: "\\_") + "%"
-    }
-
     func read(_ id: String, maxChars: Int) throws -> MailMessage {
         guard let n = Int(id) else { throw AppleError.invalid("message id \(id) is not a number") }
-        guard try !db.query("SELECT 1 FROM messages m WHERE m.ROWID = ?", [n]).isEmpty else { throw AppleError.notFound("message \(id)") }
+        guard try !db.query("SELECT 1 FROM messages m WHERE m.ROWID = ? AND m.deleted = 0", [n]).isEmpty else { throw AppleError.notFound("message \(id)") }
         guard let r = try db.query("\(Self.select) WHERE m.ROWID = ? AND \(privacySQL)", [n]).first, !hiddenRow(r) else {
             throw AppleError.hidden("message \(id)")
         }

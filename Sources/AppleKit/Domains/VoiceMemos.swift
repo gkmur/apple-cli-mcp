@@ -97,6 +97,14 @@ final class VoiceMemosStore {
     let db: SQLiteReader
     let privacy: PrivacyFilter
     private(set) var hiddenCount = 0
+    /// Transcript box per audio file, read once per command.
+    private var payloads: [String: Data?] = [:]
+    private func payload(_ path: String) -> Data? {
+        if let p = payloads[path] { return p }
+        let p = Self.tsrpPayload(path)
+        payloads[path] = p
+        return p
+    }
 
     init(_ ctx: Context) throws {
         let s = try ctx.settings(VoiceMemosSettings.self)
@@ -118,17 +126,17 @@ final class VoiceMemosStore {
             if privacy.hides(title: title, containers: [], id: id) { hiddenCount += 1; continue }
             let path = r.str("ZPATH").map { Self.dir + "/" + $0 }.flatMap { FileManager.default.fileExists(atPath: $0) ? $0 : nil }
             out.append(Recording(id: id, title: title, date: r.date("ZDATE"), seconds: (r["ZDURATION"] as? Double) ?? 0,
-                                 audioPath: path, hasTranscript: path.map(Self.hasTranscript) ?? false))
+                                 audioPath: path, hasTranscript: path.map { payload($0) != nil } ?? false))
         }
         return out
     }
 
     func read(_ id: String) throws -> RecordingDetail {
         guard let rec = try recordings().first(where: { $0.id.caseInsensitiveCompare(id) == .orderedSame }) else {
-            if try !db.query("SELECT 1 FROM ZCLOUDRECORDING WHERE ZUNIQUEID = ? COLLATE NOCASE", [id]).isEmpty { throw AppleError.hidden("recording \(id)") }
+            if try !db.query("SELECT 1 FROM ZCLOUDRECORDING WHERE ZUNIQUEID = ? COLLATE NOCASE AND ZEVICTIONDATE IS NULL", [id]).isEmpty { throw AppleError.hidden("recording \(id)") }
             throw AppleError.notFound("recording \(id)")
         }
-        let t = rec.audioPath.flatMap(Self.transcript)
+        let t = rec.audioPath.flatMap { Self.transcript(payload($0)) }
         return RecordingDetail(recording: rec, transcript: t?.text, segments: t?.segments)
     }
 
@@ -136,7 +144,7 @@ final class VoiceMemosStore {
         var out: [Recording] = []
         for rec in try recordings() {
             let hit = rec.title.range(of: q, options: [.caseInsensitive, .diacriticInsensitive]) != nil
-                || (rec.audioPath.flatMap(Self.transcript)?.text.range(of: q, options: [.caseInsensitive, .diacriticInsensitive]) != nil)
+                || (rec.audioPath.flatMap { Self.transcript(payload($0)) }?.text.range(of: q, options: [.caseInsensitive, .diacriticInsensitive]) != nil)
             if hit { out.append(rec) }
             if out.count >= limit { break }
         }
@@ -179,12 +187,10 @@ final class VoiceMemosStore {
         return find(["moov", "trak", "udta", "tsrp"], from: 0, to: end) ?? find(["moov", "udta", "tsrp"], from: 0, to: end)
     }
 
-    static func hasTranscript(_ path: String) -> Bool { tsrpPayload(path) != nil }
-
     /// The transcript is an attributed string as JSON: `runs` alternates text and an index into
     /// `attributeTable`, whose entries carry each word's `timeRange` in seconds.
-    static func transcript(_ path: String) -> (text: String, segments: [TranscriptSegment])? {
-        guard let d = tsrpPayload(path),
+    static func transcript(_ payload: Data?) -> (text: String, segments: [TranscriptSegment])? {
+        guard let d = payload,
               let j = try? JSONSerialization.jsonObject(with: d) as? [String: Any],
               let a = j["attributedString"] as? [String: Any], let runs = a["runs"] as? [Any] else { return nil }
         let table = a["attributeTable"] as? [[String: Any]] ?? []
