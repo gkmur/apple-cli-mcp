@@ -114,7 +114,7 @@ def codes():
     r, ms = cli("mail", "read", str(rid))
     if (r.get("error") or {}).get("code") == "hidden":
         return "newest code email is hidden by privacy config", ms
-    check(r.get("body") in (None, "[one-time code hidden]") and r.get("preview") == "[one-time code hidden]", "one-time code email readable")
+    check(r.get("body") in (None, "[one-time code hidden]") and r.get("preview") == "[one-time code hidden]" and r.get("subject") == "[one-time code hidden]", "one-time code email readable")
     word = max(re.findall(r"[A-Za-z]{5,}", subj), key=len)
     s, _ = cli("mail", "search", word, "--limit", "500")
     check(all(x["id"] != str(rid) for x in s.get("messages", [])), "one-time code email in search")

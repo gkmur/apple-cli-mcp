@@ -3,9 +3,9 @@ import Foundation
 // One registry drives the CLI, `--json`, and the MCP server, so they cannot drift.
 
 /// Every app apple-cli knows. Adding an app = one folder under Domains/ plus one line here.
-let allDomains: [Domain] = [notesDomain, remindersDomain, contactsDomain, messagesDomain, photosDomain, calendarDomain, safariDomain, mailDomain]
+let allDomains: [Domain] = [notesDomain, remindersDomain, contactsDomain, messagesDomain, photosDomain, calendarDomain, safariDomain, mailDomain, voiceMemosDomain, shortcutsDomain, callsDomain]
 
-public let version = "0.7.0"
+public let version = "0.10.0"
 
 final class Registry {
     let context: Context

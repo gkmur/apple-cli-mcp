@@ -312,7 +312,8 @@ final class MailStore {
         let name = r.str("name").flatMap { $0.isEmpty ? nil : $0 }
         let addr = r.str("address")
         let preview = r.str("summary").map { String($0.prefix(240)).trimmingCharacters(in: .whitespacesAndNewlines) }
-        return MailSummary(id: String(r.int("id") ?? 0), subject: subject(r),
+        // A masked message's subject can hold the code itself, so it is replaced too.
+        return MailSummary(id: String(r.int("id") ?? 0), subject: masked ? "[one-time code hidden]" : subject(r),
                            from: name.map { n in addr.map { "\(n) <\($0)>" } ?? n } ?? addr ?? "unknown", fromAddress: addr,
                            date: r.int("date").map { Date(timeIntervalSince1970: Double($0)) },
                            account: box?.account ?? "", mailbox: box?.path ?? "",
@@ -377,7 +378,7 @@ final class MailStore {
                         guard let p = paths[i].1, let d = FileManager.default.contents(atPath: p),
                               let body = MIMEText.parseEMLX(d, forSearch: true)?.text else { return }
                         buf[i] = body.range(of: t, options: [.caseInsensitive, .diacriticInsensitive]) != nil
-                            && !self.isOneTimeCode(String(body.prefix(4000)))
+                            && !self.isOneTimeCode(body)
                     }
                 }
                 for (i, x) in paths.enumerated() { bodyHit[x.0] = hits[i] }
@@ -419,15 +420,16 @@ final class MailStore {
         }
         let parsed = loadBody(id: n, mailbox: r.int("mailbox"))
         var body = parsed?.text
-        if let b = body, s.preview == "[one-time code hidden]" || isOneTimeCode(String(b.prefix(4000))) { body = "[one-time code hidden]" }
+        let codeHidden = s.preview == "[one-time code hidden]" || body.map(isOneTimeCode) == true
+        if codeHidden { body = body == nil ? nil : "[one-time code hidden]" }
         let cap = max(0, maxChars)
         let truncated = (body?.count ?? 0) > cap
         if truncated { body = String(body!.prefix(cap)) }
         let dbNames = try db.query("SELECT name FROM attachments WHERE message = ? ORDER BY ROWID", [n]).compactMap { $0.str("name") }
-        return MailMessage(id: s.id, subject: s.subject, from: s.from, fromAddress: s.fromAddress, to: to, cc: cc, date: s.date,
+        return MailMessage(id: s.id, subject: codeHidden ? "[one-time code hidden]" : s.subject, from: s.from, fromAddress: s.fromAddress, to: to, cc: cc, date: s.date,
                            account: s.account, mailbox: s.mailbox, unread: s.unread, flagged: s.flagged,
                            conversationId: r.int("conv"), attachments: dbNames.isEmpty ? (parsed?.attachments ?? []) : dbNames,
-                           body: body, bodyAvailable: parsed != nil, truncated: truncated, preview: s.preview)
+                           body: body, bodyAvailable: parsed != nil, truncated: truncated, preview: codeHidden ? "[one-time code hidden]" : s.preview)
     }
 
     /// Finds `<ROWID>.emlx` (or `.partial.emlx`) for a message. Mail stores it under
