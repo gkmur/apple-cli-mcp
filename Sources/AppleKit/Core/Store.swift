@@ -12,7 +12,8 @@ public final class SQLiteReader {
     public let path: String
     public private(set) var readFromCopy = false
 
-    public init(path: String) throws {
+    /// `allowCopy: false` for huge stores (Photos is 2.2 GB): a lock fails clearly instead of copying.
+    public init(path: String, allowCopy: Bool = true) throws {
         self.path = path
         guard FileManager.default.fileExists(atPath: path) else {
             throw AppleError.notFound("database \(path)")
@@ -26,6 +27,9 @@ public final class SQLiteReader {
             _ = try query("SELECT count(*) FROM sqlite_master")
         } catch {
             close()
+            guard allowCopy else {
+                throw AppleError.database("\((path as NSString).lastPathComponent) is locked and too large to copy. Try again in a moment.")
+            }
             try openCopy()
         }
     }

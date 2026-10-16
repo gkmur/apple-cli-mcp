@@ -3,9 +3,9 @@ import Foundation
 // One registry drives the CLI, `--json`, and the MCP server, so they cannot drift.
 
 /// Every app apple-cli knows. Adding an app = one folder under Domains/ plus one line here.
-let allDomains: [Domain] = [notesDomain, remindersDomain, contactsDomain, messagesDomain]
+let allDomains: [Domain] = [notesDomain, remindersDomain, contactsDomain, messagesDomain, photosDomain]
 
-public let version = "0.3.0"
+public let version = "0.4.0"
 
 final class Registry {
     let context: Context
@@ -152,7 +152,7 @@ final class MCPServer {
                 let name = params["name"] as? String ?? ""
                 if let cmd = tools.first(where: { $0.toolName == name }) {
                     do {
-                        let out = try await registry.run(cmd, Args(raw: params["arguments"] as? [String: Any] ?? [:]))
+                        let out = try await registry.run(cmd, Args(raw: params["arguments"] as? [String: Any] ?? [:], viaMCP: true))
                         reply["result"] = ["content": [["type": "text", "text": jsonString(out)]],
                                            "structuredContent": (try? jsonObject(out)) ?? [:], "isError": false]
                     } catch {

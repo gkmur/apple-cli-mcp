@@ -90,6 +90,8 @@ public struct Command {
 /// Typed access to parsed arguments from either the CLI or MCP.
 public struct Args {
     let raw: [String: Any]
+    /// True when the call came over MCP (an agent), so commands can apply tighter limits.
+    var viaMCP = false
     func string(_ k: String) -> String? { (raw[k] as? String).flatMap { $0.isEmpty ? nil : $0 } }
     func require(_ k: String) throws -> String {
         guard let v = string(k) else { throw AppleError.invalid("missing \(k)") }

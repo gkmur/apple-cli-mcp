@@ -10,7 +10,7 @@ let package = Package(
             name: "AppleKit",
             dependencies: ["CZlib"],
             swiftSettings: [.swiftLanguageMode(.v5)],
-            linkerSettings: [.linkedLibrary("sqlite3"), .linkedFramework("EventKit"), .linkedFramework("Contacts")]
+            linkerSettings: [.linkedLibrary("sqlite3"), .linkedFramework("EventKit"), .linkedFramework("Contacts"), .linkedFramework("Photos")]
         ),
         .executableTarget(
             name: "apple-cli",
