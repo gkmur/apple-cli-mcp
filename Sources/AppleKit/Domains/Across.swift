@@ -320,6 +320,7 @@ private func permissions(request: Bool) async -> PermissionReport {
 private func row(_ name: String, _ status: String, pane: String) -> PermissionRow {
     PermissionRow(name: name, status: status, fix: status == "granted" ? nil
                   : status == "not_asked" ? "run apple-cli permissions --request in a logged-in session"
+                  : status == "app_closed" ? "open the app once (or run permissions --request) to check this one"
                   : status == "prompt_waiting" ? "a permission prompt for AppleCLI is on this Mac's screen; answer it"
                   : "System Settings > Privacy & Security > \(pane): turn on AppleCLI")
 }
@@ -346,7 +347,7 @@ private func automation(_ bundleID: String, request: Bool) -> String {
     case noErr: return "granted"
     case OSStatus(errAEEventWouldRequireUserConsent): return "not_asked"
     case OSStatus(errAEEventNotPermitted): return "denied"
-    case OSStatus(procNotFound): return "not_asked"
+    case OSStatus(procNotFound): return "app_closed"  // macOS can only answer while the app runs
     case 1: return "prompt_waiting"
     default: return "unknown (\(st))"
     }

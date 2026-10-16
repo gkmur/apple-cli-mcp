@@ -39,6 +39,13 @@ final class Registry {
             }
         }
         for p in c.params where p.required && args.raw[p.name] == nil { throw AppleError.invalid("missing \(p.name)") }
+        if let remote = try Router.target(for: c, args, context) {
+            // No fallback to this Mac: IDs from one Mac do not name the same item on the other, so a read here
+            // followed by a write there could change the wrong thing.
+            do { return try await remote.call(c.toolName, args.raw) } catch let e as Router.Unreachable {
+                throw AppleError.app("\(e.reason). \(c.path[0]) runs on the mini; pass --local to use this Mac's copy instead")
+            }
+        }
         return try await c.run(args)
     }
 }
@@ -74,10 +81,12 @@ public enum CLI {
         let reg = Registry()
         var args = Array(argv.dropFirst())
         let json = args.contains("--json")
-        args.removeAll { $0 == "--json" }
+        if args.contains("--local") { Router.forceLocal = true }
+        args.removeAll { $0 == "--json" || $0 == "--local" }
 
         if args.first == "mcp" { await MCPServer(registry: reg).serve(); return 0 }
         if args.first == "serve" {
+            Router.forceLocal = true  // the server answers from its own Mac and never forwards
             do { try await HTTPServer.start(Array(args.dropFirst()), registry: reg) } catch {
                 FileHandle.standardError.write(Data("error: \(AppleError.wrap(error).description)\n".utf8)); return 1
             }
@@ -142,7 +151,11 @@ public enum CLI {
 final class MCPServer {
     let registry: Registry
     /// Destructive commands are never tools. Without writes (the HTTP default), only reads are.
-    var tools: [Command] { registry.commands.filter { allowWrites ? $0.effect != .destructive : $0.effect == .read } }
+    var tools: [Command] { tools(deletes: false) }
+    /// Deletes are offered only to the MacBook's router (it holds the CLI token), never to agents.
+    func tools(deletes: Bool) -> [Command] {
+        registry.commands.filter { $0.effect == .read || (allowWrites && ($0.effect == .write || deletes)) }
+    }
     let allowWrites: Bool
     init(registry: Registry, allowWrites: Bool = true) { self.registry = registry; self.allowWrites = allowWrites }
 
@@ -156,7 +169,7 @@ final class MCPServer {
     }
 
     /// Answers one JSON-RPC message. Nil for notifications and anything unparseable, which get no reply.
-    func handle(_ body: Data) async -> Data? {
+    func handle(_ body: Data, deletes: Bool = false) async -> Data? {
         guard let msg = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
               let method = msg["method"] as? String, let id = msg["id"] else { return nil }
         let params = msg["params"] as? [String: Any] ?? [:]
@@ -167,14 +180,15 @@ final class MCPServer {
                                "capabilities": ["tools": [:]],
                                "serverInfo": ["name": "apple-cli", "version": version]]
         case "ping": reply["result"] = [:]
-        case "tools/list": reply["result"] = ["tools": tools.map(schema)]
+        case "tools/list": reply["result"] = ["tools": tools(deletes: deletes).map(schema)]
         case "tools/call":
             let name = params["name"] as? String ?? ""
-            if let cmd = tools.first(where: { $0.toolName == name }) {
+            if let cmd = tools(deletes: deletes).first(where: { $0.toolName == name }) {
                 do {
                     let out = try await registry.run(cmd, Args(raw: params["arguments"] as? [String: Any] ?? [:], viaMCP: true))
                     reply["result"] = ["content": [["type": "text", "text": jsonString(out)]],
-                                       "structuredContent": (try? jsonObject(out)) ?? [:], "isError": false]
+                                       "structuredContent": (try? jsonObject(out)) ?? [:], "isError": false,
+                                       "_meta": ["apple-cli/text": out.text]]
                 } catch {
                     let e = AppleError.wrap(error)
                     reply["result"] = ["content": [["type": "text", "text": jsonString(ErrorOutput(e))]], "isError": true]
@@ -206,7 +220,7 @@ enum HTTPServer {
         var opts: [String: String] = [:], writes = false, k = 0
         while k < argv.count {
             let a = argv[k]
-            if a == "--writes" { writes = true } else if ["--host", "--port", "--token-file"].contains(a), k + 1 < argv.count {
+            if a == "--writes" { writes = true } else if ["--host", "--port", "--token-file", "--cli-token-file"].contains(a), k + 1 < argv.count {
                 opts[String(a.dropFirst(2))] = argv[k + 1]; k += 1
             } else { throw AppleError.invalid("unknown serve argument \(a)") }
             k += 1
@@ -214,19 +228,24 @@ enum HTTPServer {
         guard let host = opts["host"] else { throw AppleError.invalid("serve needs --host (the address to listen on, e.g. this Mac's Tailscale IP)") }
         guard let port = NWEndpoint.Port(opts["port"] ?? "7790") else { throw AppleError.invalid("bad --port") }
         let token = try readToken(opts["token-file"] ?? NSHomeDirectory() + "/.config/apple-cli/server-token")
+        // A second token for the MacBook's router: everything the agent token allows, plus deletes, so a
+        // delete runs on the Mac whose IDs it was given. Optional; without the file, nothing can delete.
+        let cliTokenPath = opts["cli-token-file"] ?? NSHomeDirectory() + "/.config/apple-cli/cli-token"
+        let cliToken = FileManager.default.fileExists(atPath: cliTokenPath) ? try readToken(cliTokenPath) : nil
+        guard cliToken != token else { throw AppleError.refused("the CLI token and the agent token must differ") }
 
         let mode = writes ? "reads and writes" : "read-only"
         let mcp = MCPServer(registry: registry, allowWrites: writes)
-        let (queue, feed) = AsyncStream.makeStream(of: (Data, NWConnection).self)
+        let (queue, feed) = AsyncStream.makeStream(of: (Data, NWConnection, Bool).self)
         // Each request runs on its own, so one slow tool (an app launching, a prompt on screen) never holds up
         // the rest. The authenticated-connection cap bounds how many run at once.
         Task {
-            for await (body, conn) in queue {
+            for await (body, conn, deletes) in queue {
                 Task.detached {
                     let t = Date()
                     defer { io.async { runningTools -= 1 } }
-                    if let reply = await mcp.handle(body) { respond(conn, 200, reply) } else { respond(conn, 202, Data()) }
-                    log("\(describe(body)) \(Int(Date().timeIntervalSince(t) * 1000)) ms")
+                    if let reply = await mcp.handle(body, deletes: deletes) { respond(conn, 200, reply) } else { respond(conn, 202, Data()) }
+                    log("\(describe(body))\(deletes ? " [cli token]" : "") \(Int(Date().timeIntervalSince(t) * 1000)) ms")
                 }
             }
         }
@@ -261,7 +280,9 @@ enum HTTPServer {
                 // Browsers send Origin; MCP clients do not. Refusing it blocks DNS-rebinding pages.
                 guard head.headers["origin"] == nil else { return respond(conn, 403, Data()) }
                 // The token is checked before any body is read.
-                guard let auth = head.headers["authorization"], equalTimingSafe(auth, "Bearer " + token) else {
+                let auth = head.headers["authorization"] ?? ""
+                let isCLI = cliToken.map { equalTimingSafe(auth, "Bearer " + $0) } ?? false
+                guard isCLI || equalTimingSafe(auth, "Bearer " + token) else {
                     log("refused: bad or missing token from \(conn.endpoint)")
                     return respond(conn, 401, Data())
                 }
@@ -278,7 +299,7 @@ enum HTTPServer {
                     // Running tools are capped on their own: a client that hangs up does not free its tool's slot.
                     guard runningTools < maxRunningTools else { return respond(conn, 503, Data()) }
                     runningTools += 1
-                    feed.yield((body, conn))
+                    feed.yield((body, conn, isCLI))
                 }
             }
         }
@@ -379,5 +400,125 @@ enum HTTPServer {
 
     static func log(_ s: String) {
         FileHandle.standardError.write(Data("\(localISO.string(from: Date())) \(s)\n".utf8))
+    }
+}
+
+// MARK: - Routing to the mini
+
+/// Where a command runs. With `remote.url` set in config (on the MacBook), every command of the apps in
+/// `remote.apps` runs on the always-on mini over Tailscale, reads and writes alike. Whole apps move
+/// together because IDs differ between Macs: an event, contact, or email ID from this Mac names nothing
+/// (or something else) on the mini. Deletes of those apps go too, using the CLI token (agents' token
+/// cannot delete). Apps not listed run here. The mini itself has no `remote.url`, so it never forwards.
+struct RemoteSettings: DomainSettings {
+    static let key = "remote"
+    /// The mini's MCP endpoint, e.g. http://100.93.221.52:7790/mcp. Empty runs everything on this Mac.
+    var url: String
+    /// Mode-600 file holding the CLI token (the mini's ~/.config/apple-cli/cli-token).
+    var tokenFile: String
+    /// Apps whose every command runs on the mini.
+    var apps: [String]
+    static let defaults = RemoteSettings(url: "", tokenFile: "~/.config/apple-cli/remote-token",
+                                         apps: ["mail", "messages", "reminders", "calendar", "contacts", "notes"])
+}
+
+enum Router {
+    nonisolated(unsafe) static var forceLocal = ProcessInfo.processInfo.environment["APPLE_CLI_LOCAL"] != nil
+    struct Unreachable: Error { let reason: String }
+
+    static func target(for c: Command, _ args: Args, _ ctx: Context) throws -> RemoteClient? {
+        guard !forceLocal, let s = try? ctx.settings(RemoteSettings.self), !s.url.isEmpty else { return nil }
+        guard let app = c.path.first, s.apps.contains(app) else { return nil }
+        // A text with a file from this Mac is drafted and sent here (the file is here). Its recipient is a
+        // name or number, which means the same thing on both Macs.
+        if c.toolName == "messages_draft", args.string("file") != nil { return nil }
+        if c.toolName == "messages_send", let id = args.string("draft"), FileManager.default.fileExists(atPath: Draft.dir + "/\(id).json") { return nil }
+        if c.toolName == "mail_draft", !args.list("attach").isEmpty {
+            throw AppleError.refused("email with attachments from this Mac is not routed to the mini yet; pass --local to draft and send it here")
+        }
+        return try RemoteClient(url: s.url, tokenFile: s.tokenFile)
+    }
+}
+
+/// Calls one tool on the mini's MCP server and hands back its result as if it ran here.
+struct RemoteClient {
+    let url: URL
+    let token: String
+
+    init(url: String, tokenFile: String) throws {
+        guard let u = URL(string: url) else { throw AppleError.invalid("remote.url in config is not a URL") }
+        self.url = u
+        token = try HTTPServer.readToken((tokenFile as NSString).expandingTildeInPath)
+    }
+
+    private func post(_ body: [String: Any], timeout: TimeInterval) async throws -> [String: Any] {
+        var req = URLRequest(url: url, timeoutInterval: timeout)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.setValue("Bearer " + token, forHTTPHeaderField: "Authorization")
+        req.httpBody = try JSONSerialization.data(withJSONObject: body)
+        let data: Data, resp: URLResponse
+        do { (data, resp) = try await URLSession.shared.data(for: req) } catch {
+            throw Router.Unreachable(reason: "the mini (\(url.host ?? "?")) is unreachable: \(error.localizedDescription)")
+        }
+        let status = (resp as? HTTPURLResponse)?.statusCode ?? 0
+        guard status == 200, let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            if status == 401 { throw AppleError.permission("the mini refused the token in remote.tokenFile") }
+            throw Router.Unreachable(reason: "the mini answered HTTP \(status)")
+        }
+        return obj
+    }
+
+    func call(_ tool: String, _ arguments: [String: Any]) async throws -> any Output {
+        // Both Macs must run the same build, so a command means the same thing on each.
+        let hello = try await post(["jsonrpc": "2.0", "id": 0, "method": "initialize", "params": [:]], timeout: 10)
+        let theirs = ((hello["result"] as? [String: Any])?["serverInfo"] as? [String: Any])?["version"] as? String ?? "?"
+        guard theirs == version else {
+            throw AppleError.refused("this Mac runs apple-cli \(version) and the mini runs \(theirs). Install the same version on both, or pass --local")
+        }
+        let reply = try await post(["jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": ["name": tool, "arguments": arguments]], timeout: 300)
+        if let err = reply["error"] as? [String: Any] { throw AppleError.app("the mini: \(err["message"] as? String ?? "error")") }
+        guard let result = reply["result"] as? [String: Any] else { throw AppleError.app("the mini sent no result") }
+        let text = ((result["content"] as? [[String: Any]])?.first?["text"] as? String) ?? ""
+        if result["isError"] as? Bool == true {
+            let e = (try? JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any])?["error"] as? [String: Any]
+            throw AppleError.remote(code: e?["code"] as? String ?? "app_error", message: e?["message"] as? String ?? text)
+        }
+        let human = (result["_meta"] as? [String: Any])?["apple-cli/text"] as? String ?? text
+        return RemoteOutput(value: JSONValue(result["structuredContent"] ?? [:]), text: human + "\n(ran on the mini)")
+    }
+}
+
+/// A result that came back from the mini: its JSON, unchanged, and its text form.
+struct RemoteOutput: Output {
+    let value: JSONValue
+    let text: String
+    func encode(to e: Encoder) throws { try value.encode(to: e) }
+}
+
+/// Any JSON value, so a remote result re-encodes exactly as the mini produced it.
+enum JSONValue: Encodable {
+    case null, bool(Bool), int(Int), double(Double), string(String), array([JSONValue]), object([String: JSONValue])
+    init(_ v: Any) {
+        switch v {
+        case let n as NSNumber where CFGetTypeID(n) == CFBooleanGetTypeID(): self = .bool(n.boolValue)
+        case let n as NSNumber: self = Double(n.intValue) == n.doubleValue ? .int(n.intValue) : .double(n.doubleValue)
+        case let s as String: self = .string(s)
+        case let a as [Any]: self = .array(a.map(JSONValue.init))
+        case let o as [String: Any]: self = .object(o.mapValues(JSONValue.init))
+        default: self = .null
+        }
+    }
+    func encode(to e: Encoder) throws {
+        var c = e.singleValueContainer()
+        switch self {
+        case .null: try c.encodeNil()
+        case .bool(let b): try c.encode(b)
+        case .int(let i): try c.encode(i)
+        case .double(let d): try c.encode(d)
+        case .string(let s): try c.encode(s)
+        case .array(let a): try c.encode(a)
+        case .object(let o): try c.encode(o)
+        }
     }
 }

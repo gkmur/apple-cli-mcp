@@ -834,7 +834,8 @@ final class MailWriter {
         return result
     }
 
-    /// Mail files the sent copy into the account's Sent mailbox once the server takes it. Up to 45 seconds.
+    /// Mail files the sent copy into the account's Sent mailbox once the server takes it (Gmail: All Mail with
+    /// the Sent label). Up to 45 seconds.
     private func confirmSent(subject: String, since: Date, to: String) -> SendResult {
         let deadline = Date().addingTimeInterval(45)
         while Date() < deadline {
@@ -843,7 +844,9 @@ final class MailWriter {
             let sent = s.boxes.values.filter { $0.path.lowercased().contains("sent") }.map(\.id)
             guard !sent.isEmpty, let r = try? s.db.query("""
                 SELECT m.ROWID FROM messages m JOIN subjects su ON su.ROWID = m.subject
-                WHERE m.mailbox IN (\(sent.map(String.init).joined(separator: ","))) AND m.date_received >= ? AND su.subject = ?
+                WHERE (m.mailbox IN (\(sent.map(String.init).joined(separator: ",")))
+                       OR m.ROWID IN (SELECT message_id FROM labels WHERE mailbox_id IN (\(sent.map(String.init).joined(separator: ",")))))
+                  AND m.date_received >= ? AND su.subject = ?
                 ORDER BY m.ROWID DESC LIMIT 1
                 """, [Int(since.timeIntervalSince1970) - 120,
                       subject.replacingOccurrences(of: #"^(?i)(re|fwd?):\s*"#, with: "", options: .regularExpression)]).first else { continue }

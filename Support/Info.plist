@@ -13,6 +13,18 @@
     <key>NSContactsUsageDescription</key><string>apple-cli reads and edits contacts for your agents.</string>
     <key>NSPhotoLibraryUsageDescription</key><string>apple-cli downloads originals and moves items to Recently Deleted when you ask.</string>
     <key>NSCalendarsFullAccessUsageDescription</key><string>apple-cli reads and adds calendar events for your agents.</string>
+    <!-- Plain HTTP only to machines on the tailnet, where WireGuard already encrypts the traffic. -->
+    <key>NSAppTransportSecurity</key>
+    <dict>
+        <key>NSExceptionDomains</key>
+        <dict>
+            <key>ts.net</key>
+            <dict>
+                <key>NSIncludesSubdomains</key><true/>
+                <key>NSExceptionAllowsInsecureHTTPLoads</key><true/>
+            </dict>
+        </dict>
+    </dict>
     <key>NSAppleEventsUsageDescription</key><string>apple-cli creates and appends notes through Notes.app.</string>
 </dict>
 </plist>

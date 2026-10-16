@@ -45,6 +45,15 @@ public enum AppleError: Error, CustomStringConvertible {
     }
 
     static func wrap(_ e: Error) -> AppleError { (e as? AppleError) ?? .app("\(e)") }
+
+    /// Rebuilds an error the mini sent back. Its message already carries the code's prefix, which is stripped.
+    static func remote(code: String, message: String) -> AppleError {
+        let makers: [(String) -> AppleError] = [AppleError.database, AppleError.notFound, AppleError.invalid, AppleError.hidden, AppleError.refused,
+                                                AppleError.app, AppleError.permission, AppleError.schemaChanged, AppleError.timeout]
+        guard let make = makers.first(where: { $0("").code == code }) else { return .app(message) }
+        let prefix = make("").description
+        return make(message.hasPrefix(prefix) ? String(message.dropFirst(prefix.count)) : message)
+    }
 }
 
 // MARK: - Commands

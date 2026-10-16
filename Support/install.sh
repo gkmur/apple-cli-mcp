@@ -5,6 +5,8 @@
 set -euo pipefail
 cd "${0:A:h}/.."
 
+# Info.plist is linked into the binary, and the build does not notice when only it changes.
+touch Sources/apple-cli/main.swift
 swift build -c release
 
 app=~/Applications/AppleCLI.app

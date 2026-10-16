@@ -23,6 +23,15 @@ apple-cli permissions --request
 
 This shows each prompt not yet answered (Contacts, Calendars, Reminders, Photos, control of Notes and Music). It also opens the Full Disk Access pane with AppleCLI.app selected in Finder; drag it into the list and switch it on. Run it from a logged-in session, because prompts cannot show over SSH. The grants are tied to the signing certificate, so rebuilds keep them.
 
+### Routing: the mini does the work
+
+On the MacBook, `remote.url` in `~/.config/apple-cli/config.json` points at the mini. Every command of Mail, Messages, Reminders, Calendar, Contacts, and Notes then runs on the mini (`remote.apps` changes the list), reads and writes alike, and prints `(ran on the mini)`. Whole apps move together because IDs differ between Macs: an event, contact, or email ID from one Mac names nothing, or something else, on the other.
+
+- Music, Photos, Safari, Voice Memos, call history, Shortcuts, `person`, `today`, `search`, `permissions`, and `doctor` run on the MacBook.
+- Deletes of routed apps run on the mini too. The router uses the CLI token (`~/.config/apple-cli/remote-token` here, `cli-token` on the mini), which can delete; the agent token cannot.
+- A text with a file from this Mac is drafted and sent here. Email with attachments from this Mac needs `--local`. Saved mail attachments land on the mini.
+- If the mini is unreachable, routed commands fail with a clear error and run nowhere. `--local` (or `APPLE_CLI_LOCAL=1`) runs one on this Mac's copy.
+
 ## Commands
 
 Add `--json` to any command.
