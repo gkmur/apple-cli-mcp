@@ -1,46 +1,234 @@
 import Foundation
 
-// MARK: - Fast read path (NoteStore.sqlite, read-only)
+// Notes: reads from NoteStore.sqlite (protobuf bodies), writes through Notes.app scripting
+// scoped to one note or folder ID.
 
-public struct NoteRow {
-    public let pk: Int
-    public let id: String?            // ZIDENTIFIER, stable across devices
-    public let title: String?
-    public let snippet: String?
-    public let folder: String?
-    public let folderPath: [String]   // folder, then each parent folder up to the top
-    public let folderIsTrash: Bool
-    public let created: Date?
-    public let modified: Date?
-    public let pinned: Bool
-    public let locked: Bool           // password protected, body is encrypted
-    public let downloaded: Bool       // false = Notes has not fetched the body from iCloud yet
-    public let synced: Bool           // CloudKit returned a server record for this note
-    public let hasChecklist: Bool
-    public let body: Data?            // gzipped protobuf from ZICNOTEDATA
+// MARK: - Domain
 
-    /// The ID Notes.app's AppleScript dictionary uses for this note.
-    public func scriptID(storeUUID: String) -> String { "x-coredata://\(storeUUID)/ICNote/p\(pk)" }
+struct NotesSettings: DomainSettings {
+    static let key = "notes"
+    /// Regexes matched against note titles. A match hides the note everywhere.
+    var excludeTitlePatterns: [String]
+    /// Folder names whose notes (and subfolders) are hidden everywhere.
+    var excludeFolders: [String]
+    /// Note IDs (ZIDENTIFIER) hidden everywhere.
+    var excludeNoteIDs: [String]
 
-    public func summary() -> [String: Any] {
-        [
-            "id": id ?? NSNull(), "pk": pk, "title": title ?? NSNull(), "folder": folder ?? NSNull(),
-            "modified": isoString(modified), "created": isoString(created), "pinned": pinned,
-            "downloaded": downloaded, "locked": locked, "synced": synced,
-        ]
+    static let defaults = NotesSettings(
+        excludeTitlePatterns: [
+            #"(?i)\b(passwords?|passcodes?|pw|pwd|logins?|credentials?|api[ _-]?keys?|tokens?|secrets?|ssn|pins?|2fa|mfa|otp|backup codes?|recovery (codes?|keys?)|seed( phrase)?|wi-?fi)\b"#,
+            #"(?i)journal|diary"#,
+            #"(?i)therap(y|ist)|counsel(l?ing|or)"#,
+        ],
+        excludeFolders: [], excludeNoteIDs: [])
+}
+
+let notesDomain = Domain(name: "notes", defaults: NotesSettings.defaults, commands: notesCommands, checks: { ctx in
+    var out: [Check] = []
+    let t = Date()
+    do {
+        let store = try NotesStore(ctx)
+        let (notes, hidden) = try store.allNotes()
+        out.append(Check(domain: "notes", name: "store", ok: true,
+                         detail: "\(notes.count) notes readable, \(hidden) hidden, schema matches, \(Int(Date().timeIntervalSince(t) * 1000)) ms", fix: nil))
+    } catch {
+        let e = AppleError.wrap(error)
+        out.append(Check(domain: "notes", name: "store", ok: false, detail: e.description,
+                         fix: e.code == "permission" ? "System Settings > Privacy & Security > Full Disk Access" : nil))
+    }
+    out.append(Check(domain: "notes", name: "automation", ok: true,
+                     detail: "Notes.app control is checked on the first write. A denial returns code permission.", fix: nil))
+    return out
+})
+
+// MARK: - Outputs
+
+struct NoteInfo: Output {
+    let id: String?
+    let pk: Int
+    let title: String?
+    let folder: String?
+    let modified: Date?
+    let created: Date?
+    let pinned: Bool
+    let downloaded: Bool
+    let locked: Bool
+    let synced: Bool
+    var match: String? = nil
+    var markdown: String? = nil
+    var scriptId: String? = nil
+
+    var line: String {
+        let t = title ?? (downloaded ? "(untitled)" : "(not downloaded from iCloud yet)")
+        let mod = modified.map { String(localISO.string(from: $0).prefix(10)) } ?? ""
+        return "\(id ?? "p\(pk)")  \(mod)  [\(folder ?? "-")]  \(t)"
+    }
+    var text: String {
+        if let markdown { return markdown }
+        if let scriptId { return "created \(id ?? scriptId)" }
+        return line + (match.map { "\n    …\($0)…" } ?? "")
     }
 }
 
-public final class NotesStore {
-    public static let defaultPath = NSHomeDirectory() + "/Library/Group Containers/group.com.apple.notes/NoteStore.sqlite"
+struct NoteList: Output {
+    let notes: [NoteInfo]
+    let hidden: Int
+    var text: String { notes.map(\.text).joined(separator: "\n") + hiddenLine(hidden) }
+}
+
+struct NoteSearch: Output {
+    let results: [NoteInfo]
+    let hidden: Int
+    var text: String { results.map(\.text).joined(separator: "\n") + hiddenLine(hidden) }
+}
+
+struct NoteFolder: Encodable { let pk: Int; let id: String?; let name: String; let trash: Bool; let notes: Int }
+struct NoteFolders: Output {
+    let folders: [NoteFolder]
+    var text: String { folders.map { "\($0.name)  (\($0.notes))" }.joined(separator: "\n") }
+}
+
+struct NoteAck: Output {
+    let id: String?
+    var appended: Bool? = nil
+    var trashed: Bool? = nil
+    var text: String { trashed == true ? "moved \(id ?? "") to Recently Deleted" : "appended to \(id ?? "")" }
+}
+
+private func hiddenLine(_ n: Int) -> String { n > 0 ? "\n\(n) note(s) hidden by privacy config" : "" }
+
+// MARK: - Commands
+
+private func notesCommands(_ ctx: Context) -> [Command] {[
+    Command(["notes", "list"], .read, "List notes, newest first.",
+            [Param("folder", "Only notes in this folder"), Param("limit", .integer, "Max notes (default 50)")]) { a in
+        let (notes, hidden) = try NotesStore(ctx).allNotes()
+        let f = a.string("folder")?.lowercased()
+        return NoteList(notes: notes.filter { f == nil || $0.folder?.lowercased() == f }.prefix(a.int("limit", 50)).map { $0.info() },
+                        hidden: hidden)
+    },
+    Command(["notes", "folders"], .read, "List note folders with counts.") { _ in
+        NoteFolders(folders: try NotesStore(ctx).folders())
+    },
+    Command(["notes", "search"], .read, "Search note titles and bodies (case-insensitive).",
+            [Param("query", required: true, positional: true, "Text to find"), Param("limit", .integer, "Max results (default 20)")]) { a in
+        let q = try a.require("query")
+        let store = try NotesStore(ctx)
+        let (notes, hidden) = try store.allNotes()
+        var out: [NoteInfo] = []
+        for n in notes {
+            let hay = (n.title ?? "") + "\n" + (store.plainText(n) ?? "")
+            guard let r = hay.range(of: q, options: [.caseInsensitive, .diacriticInsensitive]) else { continue }
+            let lo = hay.index(r.lowerBound, offsetBy: -60, limitedBy: hay.startIndex) ?? hay.startIndex
+            let hi = hay.index(r.upperBound, offsetBy: 80, limitedBy: hay.endIndex) ?? hay.endIndex
+            var m = n.info()
+            m.match = hay[lo..<hi].replacingOccurrences(of: "\n", with: " ")
+            out.append(m)
+            if out.count >= a.int("limit", 20) { break }
+        }
+        return NoteSearch(results: out, hidden: hidden)
+    },
+    Command(["notes", "read"], .read, "Read one note as Markdown.",
+            [Param("id", required: true, positional: true, "Note ID from list/search")]) { a in
+        let store = try NotesStore(ctx)
+        let n = try store.find(try a.require("id"))
+        guard n.downloaded else { throw AppleError.notFound("body of note \(a.string("id")!). Notes has not downloaded it from iCloud yet. Open it in Notes once.") }
+        var m = n.info()
+        m.markdown = try store.markdown(n)
+        return m
+    },
+    Command(["notes", "create"], .write, "Create a note through Notes.app. Body is Markdown.",
+            [Param("title", required: true, positional: true, "Note title"),
+             Param("body", "Markdown body"), Param("folder", "Folder name (default: Notes default folder)")]) { a in
+        let store = try NotesStore(ctx)
+        let folderID = try a.string("folder").map { try store.folderScriptID(named: $0) }
+        let scriptID = try NotesWriter.create(title: try a.require("title"), markdown: a.string("body") ?? "", folderScriptID: folderID)
+        // Notes saves inserts at once; wait briefly for the row so we can return its stable ID.
+        guard var info = try waitFor(3, { try? NotesStore(ctx).find(scriptID).info() }) else {
+            return NoteInfo(id: nil, pk: Int(scriptID.components(separatedBy: "/p").last ?? "") ?? 0, title: a.string("title"), folder: nil,
+                            modified: nil, created: nil, pinned: false, downloaded: false, locked: false, synced: false, scriptId: scriptID)
+        }
+        info.scriptId = scriptID
+        return info
+    },
+    Command(["notes", "append"], .write,
+            "Append Markdown to a note. Refuses notes with checklists or attachments unless force is set, because Notes rewrites the body and drops them.",
+            [Param("id", required: true, positional: true, "Note ID"), Param("text", required: true, positional: true, "Markdown to append"),
+             Param("force", .boolean, "Append even if checklists, tables, or attachments would be lost")]) { a in
+        let store = try NotesStore(ctx)
+        let n = try store.find(try a.require("id"))
+        guard n.downloaded else { throw AppleError.refused("note body is not downloaded from iCloud yet") }
+        let atts = try store.attachmentCount(notePK: n.pk)
+        if (n.hasChecklist || atts > 0) && !a.bool("force") {
+            let what = [n.hasChecklist ? "a checklist" : nil, atts > 0 ? "\(atts) attachment(s)" : nil].compactMap { $0 }.joined(separator: " and ")
+            throw AppleError.refused("note has \(what). Appending through Notes.app would lose that content. Pass force to accept the loss.")
+        }
+        try NotesWriter.append(noteScriptID: n.scriptID(storeUUID: store.storeUUID), markdown: try a.require("text"))
+        return NoteAck(id: n.id, appended: true)
+    },
+    Command(["notes", "trash"], .destructive, "Move a note to Recently Deleted.",
+            [Param("id", required: true, positional: true, "Note ID")]) { a in
+        let store = try NotesStore(ctx)
+        let n = try store.find(try a.require("id"))
+        try NotesWriter.trash(noteScriptID: n.scriptID(storeUUID: store.storeUUID), trashFolderScriptID: try store.trashFolderScriptID())
+        return NoteAck(id: n.id, trashed: true)
+    },
+]}
+
+// MARK: - Fast read path (NoteStore.sqlite, read-only)
+
+struct NoteRow {
+    let pk: Int
+    let id: String?            // ZIDENTIFIER, stable across devices
+    let title: String?
+    let folder: String?
+    let folderPath: [String]   // folder, then each parent folder up to the top
+    let folderIsTrash: Bool
+    let created: Date?
+    let modified: Date?
+    let pinned: Bool
+    let locked: Bool           // password protected, body is encrypted
+    let downloaded: Bool       // false = Notes has not fetched the body from iCloud yet
+    let synced: Bool           // CloudKit returned a server record for this note
+    let hasChecklist: Bool
+    let body: Data?            // gzipped protobuf from ZICNOTEDATA
+
+    /// The ID Notes.app's AppleScript dictionary uses for this note.
+    func scriptID(storeUUID: String) -> String { "x-coredata://\(storeUUID)/ICNote/p\(pk)" }
+
+    func info() -> NoteInfo {
+        NoteInfo(id: id, pk: pk, title: title, folder: folder, modified: modified, created: created,
+                 pinned: pinned, downloaded: downloaded, locked: locked, synced: synced)
+    }
+}
+
+final class NotesStore {
+    static let defaultPath = NSHomeDirectory() + "/Library/Group Containers/group.com.apple.notes/NoteStore.sqlite"
+
+    /// Every column this file reads. Checked on open (schema guard).
+    static let schema: [String: [String]] = [
+        "ZICCLOUDSYNCINGOBJECT": ["Z_PK", "Z_ENT", "ZIDENTIFIER", "ZTITLE1", "ZTITLE2", "ZTITLE", "ZSNIPPET", "ZCREATIONDATE3",
+                                  "ZMODIFICATIONDATE1", "ZISPINNED", "ZISPASSWORDPROTECTED", "ZNEEDSINITIALFETCHFROMCLOUD",
+                                  "ZHASCHECKLIST", "ZSERVERRECORDDATA", "ZFOLDER", "ZFOLDERTYPE", "ZPARENT", "ZMARKEDFORDELETION",
+                                  "ZNOTEDATA", "ZNOTE", "ZNOTE1", "ZTYPEUTI", "ZTYPEUTI1", "ZURLSTRING", "ZALTTEXT", "ZMERGEABLEDATA1"],
+        "ZICNOTEDATA": ["Z_PK", "ZDATA"],
+        "Z_METADATA": ["Z_UUID"],
+        "Z_PRIMARYKEY": ["Z_ENT", "Z_NAME"],
+    ]
 
     let db: SQLiteReader
     let privacy: PrivacyFilter
-    public let storeUUID: String
+    let storeUUID: String
     private var ent: [String: Int] = [:]
 
-    public init(path: String = NotesStore.defaultPath, privacy: PrivacyFilter) throws {
+    convenience init(_ ctx: Context) throws {
+        let s = try ctx.settings(NotesSettings.self)
+        try self.init(privacy: try PrivacyFilter(titlePatterns: s.excludeTitlePatterns, containers: s.excludeFolders, ids: s.excludeNoteIDs))
+    }
+
+    init(path: String = NotesStore.defaultPath, privacy: PrivacyFilter) throws {
         db = try SQLiteReader(path: path)
+        try db.require(Self.schema)
         self.privacy = privacy
         storeUUID = try db.query("SELECT Z_UUID FROM Z_METADATA").first?.str("Z_UUID") ?? ""
         for r in try db.query("SELECT Z_ENT, Z_NAME FROM Z_PRIMARYKEY") {
@@ -52,9 +240,9 @@ public final class NotesStore {
 
     /// Every live note, newest first. Privacy-excluded notes are removed here,
     /// so nothing downstream can print them. Returns the hidden count too.
-    public func allNotes(includeTrash: Bool = false) throws -> (notes: [NoteRow], hidden: Int) {
+    func allNotes(includeTrash: Bool = false) throws -> (notes: [NoteRow], hidden: Int) {
         let rows = try db.query("""
-            SELECT n.Z_PK, n.ZIDENTIFIER, n.ZTITLE1, n.ZSNIPPET, n.ZCREATIONDATE3, n.ZMODIFICATIONDATE1,
+            SELECT n.Z_PK, n.ZIDENTIFIER, n.ZTITLE1, n.ZCREATIONDATE3, n.ZMODIFICATIONDATE1,
                    n.ZISPINNED, n.ZISPASSWORDPROTECTED, n.ZNEEDSINITIALFETCHFROMCLOUD, n.ZHASCHECKLIST,
                    n.ZSERVERRECORDDATA IS NOT NULL AS SYNCED, n.ZFOLDER,
                    f.ZTITLE2 AS FOLDER, f.ZFOLDERTYPE AS FOLDERTYPE, d.ZDATA
@@ -68,41 +256,44 @@ public final class NotesStore {
         var notes: [NoteRow] = []
         var hidden = 0
         for r in rows {
+            let folder = r.str("FOLDER")
             let n = NoteRow(
-                pk: r.int("Z_PK") ?? 0, id: r.str("ZIDENTIFIER"), title: r.str("ZTITLE1"),
-                snippet: r.str("ZSNIPPET"), folder: r.str("FOLDER"),
+                pk: r.int("Z_PK") ?? 0, id: r.str("ZIDENTIFIER"), title: r.str("ZTITLE1"), folder: folder,
                 folderPath: r.int("ZFOLDER").flatMap { paths[$0] } ?? [], folderIsTrash: r.int("FOLDERTYPE") == 1,
                 created: r.date("ZCREATIONDATE3"), modified: r.date("ZMODIFICATIONDATE1"),
                 pinned: r.bool("ZISPINNED"), locked: r.bool("ZISPASSWORDPROTECTED"),
                 downloaded: !r.bool("ZNEEDSINITIALFETCHFROMCLOUD") && r.data("ZDATA") != nil,
                 synced: r.bool("SYNCED"), hasChecklist: r.bool("ZHASCHECKLIST"), body: r.data("ZDATA"))
             if n.folderIsTrash && !includeTrash { continue }
-            if privacy.excludes(note: n) { hidden += 1; continue }
+            // The joined folder name is checked as well as the path, so an unresolved path never fails open.
+            if privacy.hides(title: n.title, containers: n.folderPath + [folder].compactMap { $0 }, id: n.id, locked: n.locked) {
+                hidden += 1; continue
+            }
             notes.append(n)
         }
         return (notes, hidden)
     }
 
     /// Finds one note by ZIDENTIFIER, Z_PK, `p<pk>`, or full x-coredata ID.
-    /// Throws `.excluded` for a hidden note so callers never print it.
-    public func find(_ ref: String, includeTrash: Bool = false) throws -> NoteRow {
+    /// Throws `hidden` for an excluded note so callers never print it.
+    func find(_ ref: String, includeTrash: Bool = false) throws -> NoteRow {
         let pk: Int? = {
             if let i = Int(ref) { return i }
             if let r = ref.range(of: "/ICNote/p") { return Int(ref[r.upperBound...]) }
             if ref.hasPrefix("p") { return Int(ref.dropFirst()) }
             return nil
         }()
-        let rows = try db.query("SELECT Z_PK FROM ZICCLOUDSYNCINGOBJECT WHERE Z_ENT = ? AND (ZIDENTIFIER = ? OR Z_PK = ?)",
-                                [e("ICNote"), ref, pk ?? -1])
+        let rows = try db.query("""
+            SELECT Z_PK FROM ZICCLOUDSYNCINGOBJECT
+            WHERE Z_ENT = ? AND (ZIDENTIFIER = ? OR Z_PK = ?) AND IFNULL(ZMARKEDFORDELETION,0) = 0
+            """, [e("ICNote"), ref, pk ?? -1])
         guard let wanted = rows.first?.int("Z_PK") else { throw AppleError.notFound("note \(ref)") }
-        let all = try db.query("SELECT 1 FROM ZICCLOUDSYNCINGOBJECT WHERE Z_PK = ? AND IFNULL(ZMARKEDFORDELETION,0) = 0", [wanted])
-        guard !all.isEmpty else { throw AppleError.notFound("note \(ref)") }
         let (notes, _) = try allNotes(includeTrash: true)
         if let n = notes.first(where: { $0.pk == wanted }) {
             if n.folderIsTrash && !includeTrash { throw AppleError.notFound("note \(ref) (it is in Recently Deleted)") }
             return n
         }
-        throw AppleError.excluded("note \(ref)")
+        throw AppleError.hidden("note \(ref)")
     }
 
     /// Folder pk -> its name followed by every ancestor's name. Nested folders link
@@ -121,7 +312,7 @@ public final class NotesStore {
         return out
     }
 
-    public func folders() throws -> [[String: Any]] {
+    func folders() throws -> [NoteFolder] {
         let rows = try db.query("""
             SELECT f.Z_PK, f.ZIDENTIFIER, f.ZTITLE2, f.ZFOLDERTYPE,
               (SELECT count(*) FROM ZICCLOUDSYNCINGOBJECT n WHERE n.Z_ENT = ? AND n.ZFOLDER = f.Z_PK
@@ -131,13 +322,14 @@ public final class NotesStore {
         let paths = try folderPaths()
         return rows.compactMap { r in
             guard let name = r.str("ZTITLE2"),
-                  !(paths[r.int("Z_PK") ?? -1] ?? [name]).contains(where: privacy.excludes(folder:)) else { return nil }
-            return ["pk": r.int("Z_PK") ?? 0, "id": r.str("ZIDENTIFIER") ?? NSNull(), "name": name,
-                    "trash": r.int("ZFOLDERTYPE") == 1, "notes": r.int("COUNT") ?? 0]
+                  !((paths[r.int("Z_PK") ?? -1] ?? []) + [name]).contains(where: privacy.hidesContainer) else { return nil }
+            return NoteFolder(pk: r.int("Z_PK") ?? 0, id: r.str("ZIDENTIFIER"), name: name,
+                              trash: r.int("ZFOLDERTYPE") == 1, notes: r.int("COUNT") ?? 0)
         }
     }
 
-    public func folderScriptID(named name: String) throws -> String {
+    func folderScriptID(named name: String) throws -> String {
+        if privacy.hidesContainer(name) { throw AppleError.hidden("folder \(name)") }
         let rows = try db.query("""
             SELECT Z_PK FROM ZICCLOUDSYNCINGOBJECT
             WHERE Z_ENT = ? AND IFNULL(ZMARKEDFORDELETION,0) = 0 AND IFNULL(ZFOLDERTYPE,0) = 0 AND ZTITLE2 = ? COLLATE NOCASE
@@ -148,7 +340,7 @@ public final class NotesStore {
         return "x-coredata://\(storeUUID)/ICFolder/p\(pk)"
     }
 
-    public func trashFolderScriptID() throws -> String {
+    func trashFolderScriptID() throws -> String {
         guard let pk = try db.query("SELECT Z_PK FROM ZICCLOUDSYNCINGOBJECT WHERE Z_ENT = ? AND ZFOLDERTYPE = 1 LIMIT 1",
                                     [e("ICFolder")]).first?.int("Z_PK") else { throw AppleError.notFound("Recently Deleted folder") }
         return "x-coredata://\(storeUUID)/ICFolder/p\(pk)"
@@ -156,7 +348,7 @@ public final class NotesStore {
 
     /// Count of attachments (tables, images, hashtags, links) inside a note.
     /// Setting a body through AppleScript drops these, so append checks this first.
-    public func attachmentCount(notePK: Int) throws -> Int {
+    func attachmentCount(notePK: Int) throws -> Int {
         let rows = try db.query("""
             SELECT count(*) AS C FROM ZICCLOUDSYNCINGOBJECT
             WHERE IFNULL(ZMARKEDFORDELETION,0) = 0
@@ -168,12 +360,12 @@ public final class NotesStore {
     // MARK: Body decoding
 
     /// Plain text of a note body, or nil when the body is missing or not a protobuf.
-    public func plainText(_ n: NoteRow) -> String? {
+    func plainText(_ n: NoteRow) -> String? {
         guard let raw = n.body.flatMap(gunzip), let root = try? PB.parse(raw) else { return nil }
         return root.path(2, 3, 2)?.string
     }
 
-    public func markdown(_ n: NoteRow) throws -> String {
+    func markdown(_ n: NoteRow) throws -> String {
         guard let raw = n.body.flatMap(gunzip), let root = try? PB.parse(raw),
               let note = root.path(2, 3) else {
             throw AppleError.invalid("note body is not in the protobuf format this tool reads")
@@ -380,30 +572,7 @@ enum NoteTable {
 /// Every call names one note or folder by ID. Nothing here uses `whose`
 /// or enumerates notes, which is what makes plain osascript hang.
 public enum NotesWriter {
-    /// Runs AppleScript from stdin with arguments passed as argv, so user text
-    /// is never spliced into script source.
-    static func run(_ script: String, _ args: [String], timeout: TimeInterval = 15) throws -> String {
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
-        p.arguments = ["-"] + args
-        let inPipe = Pipe(), outPipe = Pipe(), errPipe = Pipe()
-        p.standardInput = inPipe; p.standardOutput = outPipe; p.standardError = errPipe
-        try p.run()
-        inPipe.fileHandleForWriting.write(script.data(using: .utf8)!)
-        try inPipe.fileHandleForWriting.close()
-        let deadline = Date().addingTimeInterval(timeout)
-        while p.isRunning && Date() < deadline { usleep(5_000) }
-        if p.isRunning { p.terminate(); throw AppleError.script("osascript timed out after \(Int(timeout))s") }
-        let out = String(decoding: outPipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        guard p.terminationStatus == 0 else {
-            let err = String(decoding: errPipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            if err.contains("-1743") { throw AppleError.permission("allow this app to control Notes in System Settings > Privacy & Security > Automation") }
-            throw AppleError.script(err)
-        }
-        return out
-    }
+    static func run(_ script: String, _ args: [String]) throws -> String { try Osascript.run(script, args, app: "Notes") }
 
     /// Creates a note and returns Notes' x-coredata ID for it.
     public static func create(title: String, markdown: String, folderScriptID: String?) throws -> String {

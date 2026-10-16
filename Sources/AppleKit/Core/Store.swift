@@ -1,6 +1,8 @@
 import Foundation
 import SQLite3
 
+// Shared access paths: read-only SQLite for app stores, and osascript for scripted writes.
+
 /// A read-only SQLite connection. Opens the live file with `mode=ro`.
 /// If the file is locked or cannot be opened, copies the database plus its
 /// `-wal` and `-shm` files to a temp folder and reads the copy instead.
@@ -14,6 +16,9 @@ public final class SQLiteReader {
         self.path = path
         guard FileManager.default.fileExists(atPath: path) else {
             throw AppleError.notFound("database \(path)")
+        }
+        if !FileManager.default.isReadableFile(atPath: path) {
+            throw AppleError.permission("cannot read \(path). Give the terminal or app running apple-cli Full Disk Access in System Settings > Privacy & Security")
         }
         do {
             try open(path)
@@ -38,16 +43,12 @@ public final class SQLiteReader {
     }
 
     private func openCopy() throws {
-        let dir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("apple-cli-\(UUID().uuidString)")
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("apple-cli-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         tempDir = dir
         let name = (path as NSString).lastPathComponent
-        for suffix in ["", "-wal", "-shm"] {
-            let src = path + suffix
-            if FileManager.default.fileExists(atPath: src) {
-                try FileManager.default.copyItem(atPath: src, toPath: dir.appendingPathComponent(name + suffix).path)
-            }
+        for suffix in ["", "-wal", "-shm"] where FileManager.default.fileExists(atPath: path + suffix) {
+            try FileManager.default.copyItem(atPath: path + suffix, toPath: dir.appendingPathComponent(name + suffix).path)
         }
         try open(dir.appendingPathComponent(name).path)
         readFromCopy = true
@@ -58,6 +59,20 @@ public final class SQLiteReader {
         db = nil
         if let tempDir { try? FileManager.default.removeItem(at: tempDir) }
         tempDir = nil
+    }
+
+    /// Schema guard. Throws `schema_changed` naming every missing table or column,
+    /// so an OS update produces a clear error instead of wrong answers.
+    public func require(_ expected: [String: [String]]) throws {
+        var missing: [String] = []
+        for (table, cols) in expected {
+            let have = Set(try query("SELECT name FROM pragma_table_info(?)", [table]).compactMap { $0.str("name") })
+            if have.isEmpty { missing.append(table); continue }
+            missing += cols.filter { !have.contains($0) }.map { "\(table).\($0)" }
+        }
+        if !missing.isEmpty {
+            throw AppleError.schemaChanged("\((path as NSString).lastPathComponent) is missing \(missing.sorted().joined(separator: ", "))")
+        }
     }
 
     /// Runs one statement and returns every row as column-name -> value.
@@ -103,28 +118,6 @@ public final class SQLiteReader {
     }
 }
 
-public enum AppleError: Error, CustomStringConvertible {
-    case database(String)
-    case notFound(String)
-    case invalid(String)
-    case excluded(String)
-    case refused(String)
-    case script(String)
-    case permission(String)
-
-    public var description: String {
-        switch self {
-        case .database(let s): return "database error: \(s)"
-        case .notFound(let s): return "not found: \(s)"
-        case .invalid(let s): return "invalid input: \(s)"
-        case .excluded(let s): return "hidden by privacy config: \(s)"
-        case .refused(let s): return "refused: \(s)"
-        case .script(let s): return "Notes.app error: \(s)"
-        case .permission(let s): return "permission needed: \(s)"
-        }
-    }
-}
-
 // Row helpers. Core Data stores dates as seconds since 2001-01-01.
 extension Dictionary where Key == String, Value == Any {
     func int(_ k: String) -> Int? { (self[k] as? Int64).map(Int.init) ?? (self[k] as? Double).map { Int($0) } }
@@ -138,10 +131,29 @@ extension Dictionary where Key == String, Value == Any {
     }
 }
 
-public func isoString(_ d: Date?) -> Any {
-    guard let d else { return NSNull() }
-    let f = ISO8601DateFormatter()
-    f.timeZone = .current
-    f.formatOptions = [.withInternetDateTime]
-    return f.string(from: d)
+/// Runs AppleScript from stdin with arguments passed as argv, so user text
+/// is never spliced into script source. Every call has a deadline.
+enum Osascript {
+    static func run(_ script: String, _ args: [String], app: String, timeout: TimeInterval = 15) throws -> String {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+        p.arguments = ["-"] + args
+        let inPipe = Pipe(), outPipe = Pipe(), errPipe = Pipe()
+        p.standardInput = inPipe; p.standardOutput = outPipe; p.standardError = errPipe
+        try p.run()
+        inPipe.fileHandleForWriting.write(Data(script.utf8))
+        try inPipe.fileHandleForWriting.close()
+        let deadline = Date().addingTimeInterval(timeout)
+        while p.isRunning && Date() < deadline { usleep(5_000) }
+        if p.isRunning { p.terminate(); throw AppleError.timeout("\(app) did not answer within \(Int(timeout))s") }
+        let out = String(decoding: outPipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard p.terminationStatus == 0 else {
+            let err = String(decoding: errPipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if err.contains("-1743") { throw AppleError.permission("allow control of \(app) in System Settings > Privacy & Security > Automation") }
+            throw AppleError.app("\(app): \(err)")
+        }
+        return out
+    }
 }
