@@ -57,7 +57,7 @@ Add apple-cli as an MCP server on stdio. For Claude Code:
 claude mcp add apple-cli -- apple-cli mcp
 ```
 
-It gives 84 tools. Deletes are not tools.
+It gives 84 tools.
 
 <p align="center">
   <img alt="apple-cli lists the names of its 84 MCP tools." src="docs/media/mcp.gif" width="100%">
