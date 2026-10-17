@@ -11,12 +11,11 @@ apple-cli gives AI agents fast access to 12 Apple apps on a Mac: Notes, Reminder
 
 ## What it does
 
-- **Reads are fast.** Most reads go directly to the store of each app. The store is opened read-only. Notes and Reminders reads take 15 to 250 ms.
-- **Writes use official routes only.** Reminders and Calendar use EventKit. Contacts use the Contacts framework. Notes uses AppleScript for one note or folder ID at a time.
-- **No command writes to an app database.** Thus, iCloud sync stays correct.
-- **Texts and email go out in two steps.** First, the agent makes a draft. Then, after a person approves the draft, the agent sends that draft without changes.
-- **A privacy config hides data before a command gets it.** Hidden notes, chats, contacts, calendars, and mailboxes never print and never show in search.
-- **Deletes are CLI only.** No MCP tool can delete data.
+- **Fast reads.** Reads go directly to the store of each app, read-only. Notes and Reminders reads take 15 to 250 ms.
+- **Official writes.** Writes use EventKit, the Contacts framework, or AppleScript for Notes. No command writes to an app database, so iCloud sync stays correct.
+- **Drafts before sends.** A text or email goes out only after a person approves the draft.
+- **Privacy rules.** Hidden notes, chats, contacts, calendars, and mailboxes never print and never show in search.
+- **No deletes over MCP.** Deletes are CLI only.
 
 <p align="center">
   <img alt="apple-cli makes a text message draft. The draft shows the recipient and the text, and gives the command that sends it." src="docs/media/drafts.gif" width="100%">
@@ -29,33 +28,26 @@ apple-cli gives AI agents fast access to 12 Apple apps on a Mac: Notes, Reminder
   <img alt="Diagram. An agent calls apple-cli as a CLI, as an MCP server on stdio, or as an MCP server over HTTP. Each request goes through the privacy filter, then to the reader or writer for the app, then to the Apple store. A laptop can send whole apps to an always-on Mac over Tailscale. claude.ai can connect through Cloudflare Access." src="docs/media/architecture-light.svg">
 </picture>
 
-For each app, apple-cli uses the fastest correct official path. It uses SQLite only when the official path stops, is slow, or does not show the necessary data. [docs/architecture.md](docs/architecture.md) gives the design and the reason for each choice.
+apple-cli reads SQLite only when the official API stops, is slow, or does not show the necessary data. [docs/architecture.md](docs/architecture.md) gives the reason for each app.
 
 ## Install
 
-1. Run the install script.
+1. Build, sign, and link apple-cli.
 
    ```bash
    Support/install.sh
    ```
 
-   The script builds apple-cli and puts it in `~/Applications/AppleCLI.app`. It signs the app with your Apple Development certificate. It links `~/.local/bin/apple-cli` to the app.
-
-2. Give the permissions.
+2. Answer the permission prompts.
 
    ```bash
    apple-cli permissions --request
    ```
 
-   This command shows each macOS permission prompt that has no answer. It also opens the Full Disk Access pane, with AppleCLI.app selected in Finder.
-
 3. Drag AppleCLI.app into the Full Disk Access list, and turn it on.
 
 > [!NOTE]
-> Each command runs as AppleCLI.app, from Terminal, launchd, SSH, or an agent. Thus, one set of permissions applies to all of them. The permissions stay after a rebuild, because they attach to the signing certificate.
-
-> [!IMPORTANT]
-> Run `permissions --request` in a session where you are logged in. macOS cannot show a permission prompt over SSH.
+> Do step 2 in a logged-in session, not over SSH. The permissions belong to AppleCLI.app. Thus, they apply to each caller and stay after a rebuild.
 
 ## Use it with an agent
 
@@ -65,13 +57,11 @@ Add apple-cli as an MCP server on stdio. For Claude Code:
 claude mcp add apple-cli -- apple-cli mcp
 ```
 
-The server gives 84 tools, one for each command that is not CLI only. Each read tool has a read-only hint.
+It gives 84 tools. Deletes are not tools.
 
 <p align="center">
   <img alt="apple-cli lists the names of its 84 MCP tools." src="docs/media/mcp.gif" width="100%">
 </p>
-
-Errors come back as `{"error": {"code", "message"}}`. The codes are `not_found`, `hidden`, `refused`, `permission`, `schema_changed`, `timeout`, `invalid`, `app_error`, and `database`.
 
 ## Run it as a server on an always-on Mac
 
@@ -79,13 +69,7 @@ Errors come back as `{"error": {"code", "message"}}`. The codes are `not_found`,
 apple-cli serve --host <tailscale-ip> --token-file ~/.config/apple-cli/server-token --writes
 ```
 
-Run this command on a Mac that stays on, as a launchd job. The server listens on the Tailscale address only, on port 7790. Each request must have the bearer token from the token file. Set the mode of the token file to 600.
-
-- Without `--writes`, the server is read-only.
-- With `--writes`, agents on your tailnet can make drafts, send texts and email, and edit data. Deletes stay CLI only.
-- The log records only method names and tool names.
-
-On the first run, log in to that Mac. Let AppleCLI through the firewall, answer the permission prompts, and give it Full Disk Access.
+Run this command on a Mac that stays on, as a launchd job. The server listens only on the Tailscale address, port 7790. Each request must have the bearer token. Without `--writes`, the server is read-only.
 
 <details>
 <summary>Connect from claude.ai, and send whole apps from a laptop</summary>
@@ -204,20 +188,15 @@ apple-cli serve --host IP [--port 7790] [--token-file PATH] [--writes] [--access
 
 ## Sending
 
-1. The agent runs `messages draft` or `mail draft`. The command finds the recipient and saves a draft with an ID, for example `d_1a2b3c4d`. The draft shows exactly what will go out.
+1. The agent runs `messages draft` or `mail draft`. apple-cli saves a draft with an ID, for example `d_1a2b3c4d`.
 2. The agent shows the draft to a person.
-3. After the person approves the draft, the agent runs `messages send <id>` or `mail send <id>`.
+3. After the person approves it, the agent runs `messages send <id>` or `mail send <id>`. The draft goes out without changes.
 
-> [!IMPORTANT]
-> An agent must not send a draft before a person approves it. The draft ID makes sure that the approved text is the text that goes out.
-
-- A draft can go out one time only. It expires after one hour.
-- A text goes to a chat that exists, or starts a new chat with a phone number or email address. It goes over iMessage, or over SMS with `--sms`. After the send, apple-cli reads `chat.db` and gives the status: `delivered`, `sent`, `sending`, or `failed`.
-- Email goes through Mail.app, from an account that Mail.app has. Replies and forwards keep the thread. After the send, apple-cli finds the copy in a Sent mailbox.
-- apple-cli refuses a reply to, or a forward of, an email that has a one-time code, or an email whose body Mail.app did not download.
-- The limit is 30 sends in one hour. To change it, set `send.sendsPerHour` in the config.
-- Each write and each send adds a line to `~/Library/Logs/apple-cli/audit.log`. The line has the time, the command, the recipient, and the status. It never has the text of the message.
-- Over MCP, an attachment must be in `~/Downloads/apple-cli`. Thus, an agent cannot send a file from a different folder.
+- A draft can go out one time only, and it expires after one hour.
+- After a send, apple-cli gives the status from `chat.db` or the Sent mailbox.
+- The limit is 30 sends in one hour (`send.sendsPerHour`).
+- Each send adds a line to `~/Library/Logs/apple-cli/audit.log`. The line never has the text of the message.
+- Over MCP, an attachment must be in `~/Downloads/apple-cli`.
 
 ## Privacy
 
@@ -242,11 +221,10 @@ apple-cli makes `~/.config/apple-cli/config.json` on the first run. Each app has
 
 </details>
 
-- A hidden item never prints, and search does not find it. A `read` or `append` on a hidden note stops with the error "hidden by privacy config".
-- The default rules hide notes with titles that look like credentials, and journal notes.
+- A hidden item never prints, and search does not find it.
 - A contact that is hidden in Contacts is also hidden in Messages, Mail, and call history.
-- If a rule for Messages needs Contacts and apple-cli cannot read Contacts, the Messages command stops. It does not show chats without the filter.
-- `maskOneTimeCodes` is on by default. A text with a verification code shows as `[one-time code hidden]`, and search does not find it. For Mail, it also hides sign-in and password-reset email.
+- One-time codes in texts and email are hidden by default.
+- If a Messages rule needs Contacts and apple-cli cannot read Contacts, the command stops. It does not show unfiltered chats.
 
 ## Known behavior
 
@@ -270,7 +248,7 @@ apple-cli makes `~/.config/apple-cli/config.json` on the first run. Each app has
 python3 scripts/e2e/run.py
 ```
 
-For each app, the test makes a test item through the write path. Then it reads the item, waits for iCloud to accept it, and removes it. At the end, it examines the MCP server. To test one app, add `--app contacts`. The test writes a report to `reports/e2e-<timestamp>.md`.
+For each app, the test writes an item, reads it, waits for iCloud to accept it, and removes it. Add `--app contacts` to test one app.
 
 ## Add an app
 
