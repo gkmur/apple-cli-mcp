@@ -1,61 +1,113 @@
-# apple-cli
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/media/banner-dark.svg">
+  <img alt="apple-cli. Apple apps for AI agents. One Swift binary, CLI and MCP server." src="docs/media/banner-light.svg">
+</picture>
 
-Fast access for agents to Apple Notes, Reminders, Contacts, Calendar, Photos, Messages, Mail, Safari, Voice Memos, Shortcuts, call history, and Music. One Swift binary is both the CLI and an MCP server. Design: [docs/architecture.md](docs/architecture.md).
+apple-cli gives AI agents fast access to 12 Apple apps on a Mac: Notes, Reminders, Contacts, Calendar, Photos, Messages, Mail, Safari, Voice Memos, Shortcuts, call history, and Music. One Swift binary is both the CLI and an MCP server.
 
-- Notes and Reminders reads go straight to the apps' SQLite stores, opened read-only (a locked file is copied first), 15-250 ms. Contacts reads go through the Contacts framework so linked cards merge correctly, 0.2-0.5 s. Messages reads `chat.db` directly and decodes `attributedBody`, 0.5-0.6 s with contact names (about 30 ms with `--no-names`).
-- Calendar uses EventKit for reads and writes. Photos reads `Photos.sqlite` read-only and downloads or deletes through PhotoKit. Mail, Safari, Voice Memos, Shortcuts, and call history read their stores directly, under 0.5 s for normal queries (`mail search --body` scans message files, about 2.5 s for 90 days).
-- Writes go through official routes only. Reminders use EventKit. Contacts use the Contacts framework. Notes uses AppleScript scoped to one note or folder ID, never a `whose` search. 0.1-0.8 s warm.
-- Nothing ever writes to the databases, so iCloud sync stays intact.
+<p align="center">
+  <img alt="apple-cli finds a note by a word in its body, then reads the note as Markdown." src="docs/media/notes.gif" width="100%">
+</p>
+
+## What it does
+
+- **Fast reads.** Reads go directly to the store of each app, read-only. Notes and Reminders reads take 15 to 250 ms.
+- **Official writes.** Writes use EventKit, the Contacts framework, or AppleScript for Notes. No command writes to an app database, so iCloud sync stays correct.
+- **Drafts before sends.** A text or email goes out only after a person approves the draft.
+- **Privacy rules.** Hidden notes, chats, contacts, calendars, and mailboxes never print and never show in search.
+- **No deletes over MCP.** Deletes are CLI only.
+
+<p align="center">
+  <img alt="apple-cli makes a text message draft. The draft shows the recipient and the text, and gives the command that sends it." src="docs/media/drafts.gif" width="100%">
+</p>
+
+## How it works
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/media/architecture-dark.svg">
+  <img alt="Diagram. An agent calls apple-cli as a CLI, as an MCP server on stdio, or as an MCP server over HTTP. Each request goes through the privacy filter, then to the reader or writer for the app, then to the Apple store. A laptop can send whole apps to an always-on Mac over Tailscale. claude.ai can connect through Cloudflare Access." src="docs/media/architecture-light.svg">
+</picture>
+
+apple-cli reads SQLite only when the official API stops, is slow, or does not show the necessary data. [docs/architecture.md](docs/architecture.md) gives the reason for each app.
 
 ## Install
 
+1. Build, sign, and link apple-cli.
+
+   ```bash
+   Support/install.sh
+   ```
+
+2. Answer the permission prompts.
+
+   ```bash
+   apple-cli permissions --request
+   ```
+
+3. Drag AppleCLI.app into the Full Disk Access list, and turn it on.
+
+> [!NOTE]
+> Do step 2 in a logged-in session, not over SSH. The permissions belong to AppleCLI.app. Thus, they apply to each caller and stay after a rebuild.
+
+## Use it with an agent
+
+Add apple-cli as an MCP server on stdio. For Claude Code:
+
 ```bash
-Support/install.sh
+claude mcp add apple-cli -- apple-cli mcp
 ```
 
-This builds apple-cli, wraps it in `~/Applications/AppleCLI.app`, signs it with your Apple Development certificate, and links `~/.local/bin/apple-cli` to it.
+It gives 84 tools.
 
-Every command runs as AppleCLI, whatever launched it (Claude, Terminal, launchd, SSH). So macOS permissions belong to AppleCLI, and one set of grants works everywhere on that Mac. After the first install:
+<p align="center">
+  <img alt="apple-cli lists the names of its 84 MCP tools." src="docs/media/mcp.gif" width="100%">
+</p>
 
-```bash
-apple-cli permissions --request
-```
-
-This shows each prompt not yet answered (Contacts, Calendars, Reminders, Photos, control of Notes and Music). It also opens the Full Disk Access pane with AppleCLI.app selected in Finder; drag it into the list and switch it on. Run it from a logged-in session, because prompts cannot show over SSH. The grants are tied to the signing certificate, so rebuilds keep them.
-
-### On an always-on Mac
+## Run it as a server on an always-on Mac
 
 ```bash
 apple-cli serve --host <tailscale-ip> --token-file ~/.config/apple-cli/server-token --writes
 ```
 
-Run this on a Mac that stays awake (I use a Mac mini), as a launchd job. It listens on the Tailscale address only, port 7790, and needs the bearer token in the token file (mode 600). With `--writes`, agents on your tailnet can draft and send texts and email, and edit your apps; deletes stay CLI only. Without it the server is read-only. The log records method and tool names only.
+Run this command on a Mac that stays on, as a launchd job. The server listens only on the Tailscale address, port 7790. Each request must have the bearer token. Without `--writes`, the server is read-only.
 
-The first run needs a logged-in session on that Mac: allow AppleCLI through the firewall, answer the permission prompts, and give it Full Disk Access.
+<details>
+<summary>Connect from claude.ai, and send whole apps from a laptop</summary>
 
-### From claude.ai and cloud sessions
+#### Connect from claude.ai and cloud sessions
 
-`--access-port 7791 --access-team TEAM --access-aud TAG` adds a second listener on `127.0.0.1:7791` for a Cloudflare tunnel, with a Cloudflare Access app in front. apple-cli checks Access's signed header, `Cf-Access-Jwt-Assertion`, against the team's keys and that app's audience tag, so a request that skipped Access is refused.
+Add `--access-port 7791 --access-team TEAM --access-aud TAG` to start a second listener on `127.0.0.1:7791`. Put a Cloudflare tunnel and a Cloudflare Access app in front of it.
 
-- **claude.ai**: add the tunnel's `/mcp` URL as a custom connector. Access handles the login and gives claude.ai a token that refreshes for 2 weeks. You get reads and writes, sends included.
-- **Cloud sessions and scripts**: send an Access service token as headers `CF-Access-Client-Id` and `CF-Access-Client-Secret`. They get reads, drafts, and edits. `mail_send` and `messages_send` are not offered.
-- Deletes stay with the local CLI token.
-- Leave out `--access-port` and this listener never starts.
+apple-cli examines the signed `Cf-Access-Jwt-Assertion` header on each request. It compares the header with the keys of the team and the audience tag of the app. If a request did not go through Access, apple-cli refuses it.
 
-### Routing: one Mac does the work
+| Caller | How it connects | What it can do |
+|---|---|---|
+| claude.ai | Custom connector with the `/mcp` URL of the tunnel. Access does the login. | Reads, writes, and sends |
+| Cloud sessions and scripts | Access service token in the `CF-Access-Client-Id` and `CF-Access-Client-Secret` headers | Reads, drafts, and edits. No `mail_send` or `messages_send`. |
+| Local CLI | CLI token | All of the above, plus deletes |
 
-On a laptop, set `remote.url` in `~/.config/apple-cli/config.json` to the always-on Mac. Every command of Mail, Messages, Reminders, Calendar, Contacts, and Notes then runs there (`remote.apps` changes the list), reads and writes alike, and prints `(ran on the mini)`. Whole apps move together because IDs differ between Macs: an event, contact, or email ID from one Mac names nothing, or something else, on the other.
+If you do not give `--access-port`, the second listener does not start.
 
-- Music, Photos, Safari, Voice Memos, call history, Shortcuts, `person`, `today`, `search`, `permissions`, and `doctor` run locally.
-- Deletes of routed apps run remotely too. The router uses the CLI token (`~/.config/apple-cli/remote-token`), which can delete; the agent token cannot.
-- A text with a file from this Mac is drafted and sent here. Email with attachments from this Mac needs `--local`. Saved mail attachments land on the remote Mac.
-- If the remote Mac is unreachable, routed commands fail with a clear error and run nowhere. `--local` (or `APPLE_CLI_LOCAL=1`) runs one on this Mac's copy.
-- Both Macs must run the same version; the router refuses otherwise.
-- Notes and Mail only refresh their local copies while open, so reopen them in the background on a schedule on the remote Mac.
+#### Send whole apps to the server
+
+On a laptop, set `remote.url` in `~/.config/apple-cli/config.json` to the always-on Mac. Then each command for Mail, Messages, Reminders, Calendar, Contacts, and Notes runs on that Mac. The output ends with `(ran on the mini)`. To change the list of apps, set `remote.apps`.
+
+All of the commands for one app go to the same Mac. The reason is that IDs are different on each Mac. An event ID from one Mac can identify nothing, or a different event, on the other Mac.
+
+- Music, Photos, Safari, Voice Memos, call history, Shortcuts, `person`, `today`, `search`, `permissions`, and `doctor` run on the laptop.
+- If the server is not available, a routed command stops with a clear error. It does not run on the laptop.
+- To run one command on the laptop, add `--local`, or set `APPLE_CLI_LOCAL=1`.
+- Both Macs must have the same version. If the versions are different, the router refuses the command.
+- Notes and Mail update their local copies only while they are open. On the server, open them again in the background on a schedule.
+
+</details>
 
 ## Commands
 
-Add `--json` to any command.
+Add `--json` to a command to get JSON output.
+
+<details>
+<summary>All commands</summary>
 
 ```
 apple-cli notes list [--folder NAME] [--limit N]
@@ -130,44 +182,65 @@ apple-cli serve --host IP [--port 7790] [--token-file PATH] [--writes] [--access
                                                 MCP server over HTTP, bearer token, read-only by default
 ```
 
-`--at` takes `YYYY-MM-DD [HH:MM]`, `today|tomorrow [HH:MM]`, or `+30m`, `+2h`, `+1d`. With no `--at`, the reminder is set for tomorrow at the default time. Every reminder gets a due date and an alarm at that moment, so it always pings.
+`--at` accepts `YYYY-MM-DD [HH:MM]`, `today|tomorrow [HH:MM]`, `+30m`, `+2h`, or `+1d`. If you do not give `--at`, the reminder is for tomorrow at the default time. Each reminder gets a due date and an alarm at that time.
 
-The MCP server exposes the same commands as tools (`notes_search`, `contacts_read`, `doctor`, ...), with read-only hints. Commands marked CLI only are destructive and are never MCP tools. Errors come back as `{"error": {"code", "message"}}`, with codes `not_found`, `hidden`, `refused`, `permission`, `schema_changed`, `timeout`, `invalid`, `app_error`, and `database`.
+</details>
 
 ## Sending
 
-Texts and email go out in two steps. `messages draft` and `mail draft` resolve the recipient and save a draft (`d_1a2b3c4d`) that shows exactly what will be sent. `messages send <id>` or `mail send <id>` sends that draft unchanged. A draft sends once and expires after an hour. Agents must show the draft to you and wait for your yes before sending; the draft ID makes sure what you approved is what leaves.
+1. The agent runs `messages draft` or `mail draft`. apple-cli saves a draft with an ID, for example `d_1a2b3c4d`.
+2. The agent shows the draft to a person.
+3. After the person approves it, the agent runs `messages send <id>` or `mail send <id>`. The draft goes out without changes.
 
-- A text goes to an existing chat (a group, or anyone you have texted) or starts a new one with a phone or email, over iMessage or `--sms`. `send` then watches `chat.db` and reports `delivered`, `sent`, `sending`, or `failed`.
-- Email goes through Mail.app from any account set up in Mail.app. Replies and forwards keep threading. `send` confirms the copy in a Sent mailbox. A reply or forward of a message masked as a one-time code, or one whose body Mail has not downloaded, is refused.
-- At most 30 sends an hour (`send.sendsPerHour` in config), counted in `~/Library/Logs/apple-cli/sends.log` under a lock.
-- Every write, send included, adds a line to `~/Library/Logs/apple-cli/audit.log`: time, command, recipient, status. Never message text.
-- Over MCP, attachments must already be in `~/Downloads/apple-cli`, so an agent cannot mail out arbitrary files.
-- Safari has no supported way to add bookmarks, so only the Reading List is writable. Voice Memos and call history have no write routes.
-
-## Behavior to know
-
-- `notes append` refuses a note with a checklist, table, image, hashtag, or link, unless you pass `--force`. Notes rewrites the whole body on a scripted append and drops those.
-- Checkbox lines in Markdown become plain bullets when written. Notes scripting cannot create checklists.
-- A note Notes has not downloaded from iCloud yet lists with no title, and `read` says so. Open it once in Notes to fetch it.
-- `notes trash` moves the note into Recently Deleted. A scripted `delete` stays unsaved until Notes' next insert.
-- If Apple changes a database layout in an OS update, reads fail with `schema_changed` instead of returning wrong data. Run `apple-cli doctor`.
-- A contact's `synced` is true once iCloud's CardDAV server has accepted the card, and null for linked people.
-- `messages read` takes a chat ID, a group name, a contact name, a phone number, or an email. `--since` and `--before` take `YYYY-MM-DD [HH:MM]`, `today`, `yesterday`, or `7d`/`12h`/`30m` ago.
-- Messages is read-only. Reactions fold into the message they react to. Attachments come back with their file path.
-- `calendar add` defaults to the one writable calendar whose source is iCloud. `--alert` replaces the calendar's default alerts.
-- Mail's index only updates while Mail.app runs, so every Mail listing reports `indexedThrough`, plus a `warning` once it is over a day old. Bodies come from Mail's `.emlx` files; `bodyAvailable` is false when Mail has not downloaded one.
-- `shortcuts read` lists action identifiers only, never parameters, which can hold URLs and tokens.
-- Voice Memos transcripts come from inside each `.m4a`, split into timed sentences.
-- `person`, `today`, and `search` read each app separately. If one app fails (a missing permission, say), the rest still come back and the failure is listed under `errors`.
-- `person` matches calendar attendees by full name or email, so a first name alone never pulls in someone else's meetings.
-- Music reads go through Music's scripting dictionary in bulk (about 0.3 s for the whole library). Commands refuse while Music is closed unless you pass `--launch`, since scripting opens it.
+- A draft can go out one time only, and it expires after one hour.
+- After a send, apple-cli gives the status from `chat.db` or the Sent mailbox.
+- The limit is 30 sends in one hour (`send.sendsPerHour`).
+- Each send adds a line to `~/Library/Logs/apple-cli/audit.log`. The line never has the text of the message.
+- Over MCP, an attachment must be in `~/Downloads/apple-cli`.
 
 ## Privacy
 
-`~/.config/apple-cli/config.json` is created on first run. Notes whose title matches `excludeTitlePatterns`, notes in `excludeFolders`, notes in `excludeNoteIDs`, and every password-protected note are dropped before any command sees them. They never print, search skips them, and `read` or `append` on one fails with "hidden by privacy config". The defaults hide credential-looking titles plus journal and therapy notes.
+apple-cli makes `~/.config/apple-cli/config.json` on the first run. Each app has optional rules in that file. If a key is missing, apple-cli uses the default.
 
-`reminders` has `defaultList` (`Reminders`), `defaultTime` (`09:00`), and `excludeLists`. `contacts` has `excludeNamePatterns`, `excludeGroups`, and `excludeContactIDs`. `messages` has `excludeChats` (chat ID or group name), `excludeHandles` (phone or email), `excludeNamePatterns`, and `maskOneTimeCodes` (on by default, so verification-code texts read as `[one-time code hidden]` and stay out of search). A contact hidden in `contacts` is hidden in Messages too. If a privacy rule needs Contacts and Contacts cannot be read, Messages commands fail instead of showing unfiltered chats. `calendar` has `excludeCalendars` and `excludeTitlePatterns`. `photos` has `includeHidden` and `excludeAlbums`. `safari` has `excludeDomains` and `excludePatterns`. `mail` has `excludeMailboxes`, `excludeAddresses` (address or domain), `excludeSubjectPatterns`, and `maskOneTimeCodes` (also masks sign-in and password-reset emails). `voicememos` has `excludeTitlePatterns` and `excludeIDs`. `shortcuts` has `excludeNamePatterns`. `calls` has `excludeHandles` and `excludeNamePatterns`. A contact hidden in `contacts` is hidden in Mail and call history too. Each app's section is optional, and missing keys fall back to the defaults.
+<details>
+<summary>Rules for each app</summary>
+
+| App | Rules |
+|---|---|
+| Notes | `excludeTitlePatterns`, `excludeFolders`, `excludeNoteIDs`. Notes with a password are always hidden. |
+| Reminders | `defaultList`, `defaultTime`, `excludeLists` |
+| Contacts | `excludeNamePatterns`, `excludeGroups`, `excludeContactIDs` |
+| Messages | `excludeChats`, `excludeHandles`, `excludeNamePatterns`, `maskOneTimeCodes` |
+| Calendar | `excludeCalendars`, `excludeTitlePatterns` |
+| Photos | `includeHidden`, `excludeAlbums` |
+| Safari | `excludeDomains`, `excludePatterns` |
+| Mail | `excludeMailboxes`, `excludeAddresses`, `excludeSubjectPatterns`, `maskOneTimeCodes` |
+| Voice Memos | `excludeTitlePatterns`, `excludeIDs` |
+| Shortcuts | `excludeNamePatterns` |
+| Calls | `excludeHandles`, `excludeNamePatterns` |
+
+</details>
+
+- A hidden item never prints, and search does not find it.
+- A contact that is hidden in Contacts is also hidden in Messages, Mail, and call history.
+- One-time codes in texts and email are hidden by default.
+- If a Messages rule needs Contacts and apple-cli cannot read Contacts, the command stops. It does not show unfiltered chats.
+
+## Known behavior
+
+<details>
+<summary>Limits that come from the Apple apps</summary>
+
+- `notes append` refuses a note with a checklist, table, image, hashtag, or link, unless you add `--force`. The reason is that Notes writes the full body again on an append from a script, and it removes those items.
+- A checkbox line in Markdown becomes a plain bullet. Notes scripting cannot make a checklist.
+- If Notes did not download a note from iCloud, the note shows with no title, and `read` tells you. Open the note one time in Notes to download it.
+- `notes trash` moves the note to Recently Deleted.
+- If an OS update changes the layout of a database, reads stop with `schema_changed`. They do not give incorrect data. Run `apple-cli doctor`.
+- The Mail index changes only while Mail.app runs. Thus, each Mail list gives `indexedThrough`, and a `warning` if the index is more than one day old.
+- `shortcuts read` gives only the identifiers of the actions. It never gives their parameters, because parameters can contain URLs and tokens.
+- `person`, `today`, and `search` read each app separately. If one app fails, the other apps still give results, and the failure shows in `errors`.
+
+</details>
 
 ## Test
 
@@ -175,11 +248,15 @@ Texts and email go out in two steps. `messages draft` and `mail draft` resolve t
 python3 scripts/e2e/run.py
 ```
 
-For each app, it creates a test item through the write path, reads it back, waits for iCloud to accept it, then removes it. It finishes by checking the MCP server. `--app contacts` runs one app. Writes `reports/e2e-<timestamp>.md`.
+For each app, the test writes an item, reads it, waits for iCloud to accept it, and removes it. Add `--app contacts` to test one app.
 
 ## Add an app
 
-1. Map the app's storage first: where it lives, its schema, and which official API (if any) reads and writes it.
-2. Add `Sources/AppleKit/Domains/<App>.swift` with a settings struct, a `Domain`, and its commands. Mark each command `.read`, `.write`, or `.destructive`.
-3. Add it to `allDomains` in `Core/Interface.swift`.
-4. Add `scripts/e2e/<app>.py` and register it in `run.py`.
+1. Find where the app keeps its data. Record the schema, and the official API that reads and writes it, if there is one.
+2. Add `Sources/AppleKit/Domains/<App>.swift`. Give it a settings struct, a `Domain`, and its commands. Mark each command `.read`, `.write`, or `.destructive`.
+3. Add the domain to `allDomains` in `Core/Interface.swift`.
+4. Add `scripts/e2e/<app>.py`, and add it to `run.py`.
+
+## License
+
+[MIT](LICENSE)

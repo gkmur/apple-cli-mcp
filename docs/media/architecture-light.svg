@@ -1,0 +1,121 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="876" viewBox="0 0 1280 876" role="img" aria-label="apple-cli architecture. Agents call apple-cli over the CLI, MCP on stdio, or MCP over HTTP. A privacy filter drops hidden items inside every read. Per-app readers and writers use SQLite stores read-only, EventKit, the Contacts framework, PhotoKit, and AppleScript for Notes writes. A laptop can route whole apps over Tailscale to an always-on Mac running apple-cli serve, with an optional Cloudflare Access listener for claude.ai.">
+<style>
+  .sans { font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text", "Segoe UI", "Helvetica Neue", Helvetica, Arial, sans-serif; }
+  .mono { font-family: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; }
+</style>
+<rect x="0.5" y="0.5" width="1279" height="875" rx="18" fill="#FAFAF9" stroke="#DCDCDF"/>
+<text class="mono" x="40" y="64" font-size="14" letter-spacing="1.2" fill="#8A8A91">AGENT</text>
+<text class="mono" x="280" y="64" font-size="14" letter-spacing="1.2" fill="#8A8A91">ONE BINARY</text>
+<text class="mono" x="560" y="64" font-size="14" letter-spacing="1.2" fill="#8A8A91">PRIVACY</text>
+<text class="mono" x="760" y="64" font-size="14" letter-spacing="1.2" fill="#8A8A91">READERS AND WRITERS</text>
+<text class="mono" x="1066" y="64" font-size="14" letter-spacing="1.2" fill="#8A8A91">APPLE STORES</text>
+<rect x="40" y="224.0" width="196" height="168" rx="10" fill="#FFFFFF" stroke="#DCDCDF" stroke-width="1"/>
+<text class="sans" x="62" y="270.0" font-size="18" font-weight="500" fill="#111113" text-anchor="start">Claude Code</text>
+<text class="sans" x="62" y="312.0" font-size="18" font-weight="500" fill="#111113" text-anchor="start">claude.ai</text>
+<text class="sans" x="62" y="354.0" font-size="18" font-weight="500" fill="#111113" text-anchor="start">scripts</text>
+<rect x="280" y="112.0" width="236" height="392" rx="10" fill="#FFFFFF" stroke="#DCDCDF" stroke-width="1"/>
+<image x="296" y="128.0" width="40" height="40" href="data:image/png;base64,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"/>
+<text class="sans" x="344" y="155.0" font-size="20" font-weight="600" fill="#111113" text-anchor="start">apple-cli</text>
+<line x1="298" y1="182.0" x2="498" y2="182.0" stroke="#DCDCDF"/>
+<text class="mono" x="298" y="216.0" font-size="16" font-weight="600" fill="#111113" text-anchor="start">CLI</text>
+<text class="sans" x="350" y="216.0" font-size="16" font-weight="400" fill="#55555C" text-anchor="start">argv, --json</text>
+<text class="mono" x="298" y="256.0" font-size="16" font-weight="600" fill="#111113" text-anchor="start">MCP</text>
+<text class="sans" x="350" y="256.0" font-size="16" font-weight="400" fill="#55555C" text-anchor="start">stdio</text>
+<text class="mono" x="298" y="296.0" font-size="16" font-weight="600" fill="#111113" text-anchor="start">MCP</text>
+<text class="sans" x="350" y="296.0" font-size="16" font-weight="400" fill="#55555C" text-anchor="start">HTTP, bearer token</text>
+<line x1="298" y1="338.0" x2="498" y2="338.0" stroke="#DCDCDF"/>
+<text class="sans" x="298" y="370.0" font-size="15" font-weight="400" fill="#55555C" text-anchor="start">One command table</text>
+<text class="sans" x="298" y="394.0" font-size="15" font-weight="400" fill="#55555C" text-anchor="start">for every app</text>
+<text class="sans" x="298" y="428.0" font-size="15" font-weight="400" fill="#55555C" text-anchor="start">Deletes: CLI only</text>
+<text class="sans" x="298" y="462.0" font-size="15" font-weight="400" fill="#55555C" text-anchor="start">Texts, email:</text>
+<text class="sans" x="298" y="486.0" font-size="15" font-weight="400" fill="#55555C" text-anchor="start">draft, then send</text>
+<rect x="560" y="112.0" width="156" height="392" rx="10" fill="#FCEBEB" stroke="#D9191C" stroke-width="1"/>
+<text class="sans" x="578" y="155.0" font-size="18" font-weight="600" fill="#111113" text-anchor="start">Privacy filter</text>
+<text class="sans" x="578" y="216.0" font-size="15" font-weight="400" fill="#55555C" text-anchor="start">Hidden notes,</text>
+<text class="sans" x="578" y="240.0" font-size="15" font-weight="400" fill="#55555C" text-anchor="start">chats, contacts,</text>
+<text class="sans" x="578" y="264.0" font-size="15" font-weight="400" fill="#55555C" text-anchor="start">lists, mailboxes</text>
+<text class="sans" x="578" y="288.0" font-size="15" font-weight="400" fill="#55555C" text-anchor="start">are dropped</text>
+<text class="sans" x="578" y="312.0" font-size="15" font-weight="400" fill="#55555C" text-anchor="start">inside every read.</text>
+<text class="sans" x="578" y="360.0" font-size="15" font-weight="400" fill="#55555C" text-anchor="start">No command</text>
+<text class="sans" x="578" y="384.0" font-size="15" font-weight="400" fill="#55555C" text-anchor="start">can print them.</text>
+<rect x="768" y="92" width="254" height="112" rx="10" fill="#FFFFFF" stroke="#DCDCDF" stroke-width="1"/>
+<text class="sans" x="784" y="117" font-size="15.5" font-weight="500" fill="#111113" text-anchor="start">Notes, Reminders, Messages, Mail,</text>
+<text class="sans" x="784" y="139" font-size="15.5" font-weight="500" fill="#111113" text-anchor="start">Safari, Photos, Voice Memos,</text>
+<text class="sans" x="784" y="161" font-size="15.5" font-weight="500" fill="#111113" text-anchor="start">Shortcuts, call history</text>
+<text class="mono" x="784" y="191" font-size="13.5" font-weight="400" fill="#8A8A91" text-anchor="start">reads</text>
+<line x1="742" y1="148.0" x2="759" y2="148.0" stroke="#9A9AA1" stroke-width="1.5"/><path d="M758,143.0 L768,148.0 L758,153.0 Z" fill="#9A9AA1"/>
+<rect x="768" y="214" width="254" height="54" rx="10" fill="#FFFFFF" stroke="#DCDCDF" stroke-width="1"/>
+<text class="sans" x="784" y="247" font-size="15.5" font-weight="500" fill="#111113" text-anchor="start">Calendar</text>
+<text class="mono" x="1006" y="247" font-size="13.5" font-weight="400" fill="#8A8A91" text-anchor="end">reads, writes</text>
+<line x1="742" y1="241.0" x2="759" y2="241.0" stroke="#9A9AA1" stroke-width="1.5"/><path d="M758,236.0 L768,241.0 L758,246.0 Z" fill="#9A9AA1"/>
+<rect x="768" y="278" width="254" height="54" rx="10" fill="#FFFFFF" stroke="#DCDCDF" stroke-width="1"/>
+<text class="sans" x="784" y="311" font-size="15.5" font-weight="500" fill="#111113" text-anchor="start">Reminders</text>
+<text class="mono" x="1006" y="311" font-size="13.5" font-weight="400" fill="#8A8A91" text-anchor="end">writes</text>
+<line x1="742" y1="305.0" x2="759" y2="305.0" stroke="#9A9AA1" stroke-width="1.5"/><path d="M758,300.0 L768,305.0 L758,310.0 Z" fill="#9A9AA1"/>
+<rect x="768" y="342" width="254" height="54" rx="10" fill="#FFFFFF" stroke="#DCDCDF" stroke-width="1"/>
+<text class="sans" x="784" y="375" font-size="15.5" font-weight="500" fill="#111113" text-anchor="start">Contacts</text>
+<text class="mono" x="1006" y="375" font-size="13.5" font-weight="400" fill="#8A8A91" text-anchor="end">reads, writes</text>
+<line x1="742" y1="369.0" x2="759" y2="369.0" stroke="#9A9AA1" stroke-width="1.5"/><path d="M758,364.0 L768,369.0 L758,374.0 Z" fill="#9A9AA1"/>
+<rect x="768" y="406" width="254" height="54" rx="10" fill="#FFFFFF" stroke="#DCDCDF" stroke-width="1"/>
+<text class="sans" x="784" y="439" font-size="15.5" font-weight="500" fill="#111113" text-anchor="start">Photos</text>
+<text class="mono" x="1006" y="439" font-size="13.5" font-weight="400" fill="#8A8A91" text-anchor="end">downloads, deletes</text>
+<line x1="742" y1="433.0" x2="759" y2="433.0" stroke="#9A9AA1" stroke-width="1.5"/><path d="M758,428.0 L768,433.0 L758,438.0 Z" fill="#9A9AA1"/>
+<rect x="768" y="470" width="254" height="54" rx="10" fill="#FFFFFF" stroke="#DCDCDF" stroke-width="1"/>
+<text class="sans" x="784" y="503" font-size="15.5" font-weight="500" fill="#111113" text-anchor="start">Notes</text>
+<text class="mono" x="1006" y="503" font-size="13.5" font-weight="400" fill="#8A8A91" text-anchor="end">writes</text>
+<line x1="742" y1="497.0" x2="759" y2="497.0" stroke="#9A9AA1" stroke-width="1.5"/><path d="M758,492.0 L768,497.0 L758,502.0 Z" fill="#9A9AA1"/>
+<line x1="716" y1="308.0" x2="742" y2="308.0" stroke="#9A9AA1" stroke-width="1.5"/>
+<line x1="742" y1="148.0" x2="742" y2="497.0" stroke="#9A9AA1" stroke-width="1.5"/>
+<rect x="1066" y="92" width="174" height="112" rx="10" fill="#FFFFFF" stroke="#DCDCDF" stroke-width="1"/>
+<text class="sans" x="1082" y="145.0" font-size="16.5" font-weight="600" fill="#111113" text-anchor="start">SQLite stores</text>
+<text class="sans" x="1082" y="167.0" font-size="14" font-weight="400" fill="#55555C" text-anchor="start">opened read-only</text>
+<line x1="1022" y1="148.0" x2="1057" y2="148.0" stroke="#9A9AA1" stroke-width="1.5"/><path d="M1056,143.0 L1066,148.0 L1056,153.0 Z" fill="#9A9AA1"/>
+<rect x="1066" y="214" width="174" height="118" rx="10" fill="#FFFFFF" stroke="#DCDCDF" stroke-width="1"/>
+<text class="sans" x="1082" y="279.0" font-size="16.5" font-weight="600" fill="#111113" text-anchor="start">EventKit</text>
+<line x1="1022" y1="241.0" x2="1057" y2="241.0" stroke="#9A9AA1" stroke-width="1.5"/><path d="M1056,236.0 L1066,241.0 L1056,246.0 Z" fill="#9A9AA1"/>
+<line x1="1022" y1="305.0" x2="1057" y2="305.0" stroke="#9A9AA1" stroke-width="1.5"/><path d="M1056,300.0 L1066,305.0 L1056,310.0 Z" fill="#9A9AA1"/>
+<rect x="1066" y="342" width="174" height="54" rx="10" fill="#FFFFFF" stroke="#DCDCDF" stroke-width="1"/>
+<text class="sans" x="1082" y="375.0" font-size="16.5" font-weight="600" fill="#111113" text-anchor="start">Contacts framework</text>
+<line x1="1022" y1="369.0" x2="1057" y2="369.0" stroke="#9A9AA1" stroke-width="1.5"/><path d="M1056,364.0 L1066,369.0 L1056,374.0 Z" fill="#9A9AA1"/>
+<rect x="1066" y="406" width="174" height="54" rx="10" fill="#FFFFFF" stroke="#DCDCDF" stroke-width="1"/>
+<text class="sans" x="1082" y="439.0" font-size="16.5" font-weight="600" fill="#111113" text-anchor="start">PhotoKit</text>
+<line x1="1022" y1="433.0" x2="1057" y2="433.0" stroke="#9A9AA1" stroke-width="1.5"/><path d="M1056,428.0 L1066,433.0 L1056,438.0 Z" fill="#9A9AA1"/>
+<rect x="1066" y="470" width="174" height="54" rx="10" fill="#FFFFFF" stroke="#DCDCDF" stroke-width="1"/>
+<text class="sans" x="1082" y="503.0" font-size="16.5" font-weight="600" fill="#111113" text-anchor="start">AppleScript</text>
+<line x1="1022" y1="497.0" x2="1057" y2="497.0" stroke="#9A9AA1" stroke-width="1.5"/><path d="M1056,492.0 L1066,497.0 L1056,502.0 Z" fill="#9A9AA1"/>
+<line x1="236" y1="308.0" x2="271" y2="308.0" stroke="#9A9AA1" stroke-width="1.5"/><path d="M270,303.0 L280,308.0 L270,313.0 Z" fill="#9A9AA1"/>
+<line x1="516" y1="308.0" x2="551" y2="308.0" stroke="#9A9AA1" stroke-width="1.5"/><path d="M550,303.0 L560,308.0 L550,313.0 Z" fill="#9A9AA1"/>
+<line x1="40" y1="564" x2="1240" y2="564" stroke="#DCDCDF"/>
+<text class="mono" x="40" y="600" font-size="14" letter-spacing="1.2" fill="#8A8A91">REMOTE</text>
+<rect x="40" y="624" width="300" height="96" rx="10" fill="#FFFFFF" stroke="#DCDCDF" stroke-width="1"/>
+<text class="sans" x="60" y="660" font-size="18" font-weight="600" fill="#111113" text-anchor="start">Laptop</text>
+<text class="sans" x="60" y="686" font-size="15" font-weight="400" fill="#55555C" text-anchor="start">remote.url routes whole apps:</text>
+<text class="sans" x="60" y="707" font-size="15" font-weight="400" fill="#55555C" text-anchor="start">Mail, Messages, Reminders, ...</text>
+<rect x="40" y="736" width="300" height="96" rx="10" fill="#FFFFFF" stroke="#DCDCDF" stroke-width="1" stroke-dasharray="5 4"/>
+<text class="sans" x="60" y="772" font-size="18" font-weight="600" fill="#111113" text-anchor="start">claude.ai, cloud sessions</text>
+<text class="sans" x="60" y="798" font-size="15" font-weight="400" fill="#55555C" text-anchor="start">custom connector, or an</text>
+<text class="sans" x="60" y="819" font-size="15" font-weight="400" fill="#55555C" text-anchor="start">Access service token</text>
+<rect x="400" y="624" width="300" height="96" rx="10" fill="#FFFFFF" stroke="#DCDCDF" stroke-width="1"/>
+<text class="sans" x="420" y="660" font-size="18" font-weight="600" fill="#111113" text-anchor="start">Tailscale</text>
+<text class="sans" x="420" y="686" font-size="15" font-weight="400" fill="#55555C" text-anchor="start">tailnet address only</text>
+<text class="sans" x="420" y="707" font-size="15" font-weight="400" fill="#55555C" text-anchor="start">bearer token</text>
+<rect x="400" y="736" width="300" height="96" rx="10" fill="#FFFFFF" stroke="#DCDCDF" stroke-width="1" stroke-dasharray="5 4"/>
+<text class="sans" x="420" y="772" font-size="18" font-weight="600" fill="#111113" text-anchor="start">Cloudflare Access</text>
+<text class="sans" x="420" y="798" font-size="15" font-weight="400" fill="#55555C" text-anchor="start">tunnel, optional</text>
+<text class="sans" x="420" y="819" font-size="15" font-weight="400" fill="#55555C" text-anchor="start">signed Access header checked</text>
+<rect x="760" y="624" width="480" height="208" rx="10" fill="#FFFFFF" stroke="#DCDCDF" stroke-width="1"/>
+<rect x="778" y="642" width="216" height="60" rx="8" fill="#FAFAF9" stroke="#DCDCDF" stroke-width="1"/>
+<text class="mono" x="794" y="678.0" font-size="15.5" font-weight="500" fill="#111113" text-anchor="start">Tailscale IP :7790</text>
+<rect x="778" y="754" width="216" height="60" rx="8" fill="#FAFAF9" stroke="#DCDCDF" stroke-width="1" stroke-dasharray="5 4"/>
+<text class="mono" x="794" y="790.0" font-size="15.5" font-weight="500" fill="#111113" text-anchor="start">127.0.0.1:7791</text>
+<text class="sans" x="1022" y="664" font-size="18" font-weight="600" fill="#111113" text-anchor="start">Always-on Mac</text>
+<text class="mono" x="1022" y="694" font-size="16" font-weight="500" fill="#111113" text-anchor="start">apple-cli serve</text>
+<text class="sans" x="1022" y="718" font-size="15" font-weight="400" fill="#55555C" text-anchor="start">launchd job</text>
+<text class="sans" x="1022" y="770" font-size="15" font-weight="400" fill="#55555C" text-anchor="start">Same version on</text>
+<text class="sans" x="1022" y="792" font-size="15" font-weight="400" fill="#55555C" text-anchor="start">both Macs. Deletes</text>
+<text class="sans" x="1022" y="814" font-size="15" font-weight="400" fill="#55555C" text-anchor="start">stay with the CLI.</text>
+<line x1="340" y1="672.0" x2="391" y2="672.0" stroke="#9A9AA1" stroke-width="1.5"/><path d="M390,667.0 L400,672.0 L390,677.0 Z" fill="#9A9AA1"/>
+<line x1="700" y1="672.0" x2="769" y2="672.0" stroke="#9A9AA1" stroke-width="1.5"/><path d="M768,667.0 L778,672.0 L768,677.0 Z" fill="#9A9AA1"/>
+<line x1="340" y1="784.0" x2="391" y2="784.0" stroke="#9A9AA1" stroke-width="1.5" stroke-dasharray="5 5"/><path d="M390,779.0 L400,784.0 L390,789.0 Z" fill="#9A9AA1"/>
+<line x1="700" y1="784.0" x2="769" y2="784.0" stroke="#9A9AA1" stroke-width="1.5" stroke-dasharray="5 5"/><path d="M768,779.0 L778,784.0 L768,789.0 Z" fill="#9A9AA1"/>
+</svg>
