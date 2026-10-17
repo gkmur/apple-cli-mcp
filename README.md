@@ -3,9 +3,7 @@
   <img alt="apple-cli. Apple apps for AI agents. One Swift binary, CLI and MCP server." src="docs/media/banner-light.svg">
 </picture>
 
-apple-cli gives AI agents fast access to 12 Apple apps on a Mac. The apps are Notes, Reminders, Contacts, Calendar, Photos, Messages, Mail, Safari, Voice Memos, Shortcuts, call history, and Music.
-
-One Swift binary is both the CLI and an MCP server. An agent can use it from a terminal, from an MCP client on the same Mac, or over HTTP from a different Mac.
+apple-cli gives AI agents fast access to 12 Apple apps on a Mac: Notes, Reminders, Contacts, Calendar, Photos, Messages, Mail, Safari, Voice Memos, Shortcuts, call history, and Music. One Swift binary is both the CLI and an MCP server.
 
 <p align="center">
   <img alt="apple-cli finds a note by a word in its body, then reads the note as Markdown." src="docs/media/notes.gif" width="100%">
@@ -73,8 +71,6 @@ The server gives 84 tools, one for each command that is not CLI only. Each read 
   <img alt="apple-cli lists the names of its 84 MCP tools." src="docs/media/mcp.gif" width="100%">
 </p>
 
-To get the same list, send [docs/media/tools-list.jsonl](docs/media/tools-list.jsonl) to `apple-cli mcp` on stdin.
-
 Errors come back as `{"error": {"code", "message"}}`. The codes are `not_found`, `hidden`, `refused`, `permission`, `schema_changed`, `timeout`, `invalid`, `app_error`, and `database`.
 
 ## Run it as a server on an always-on Mac
@@ -91,7 +87,10 @@ Run this command on a Mac that stays on, as a launchd job. The server listens on
 
 On the first run, log in to that Mac. Let AppleCLI through the firewall, answer the permission prompts, and give it Full Disk Access.
 
-### Connect from claude.ai and cloud sessions
+<details>
+<summary>Connect from claude.ai, and send whole apps from a laptop</summary>
+
+#### Connect from claude.ai and cloud sessions
 
 Add `--access-port 7791 --access-team TEAM --access-aud TAG` to start a second listener on `127.0.0.1:7791`. Put a Cloudflare tunnel and a Cloudflare Access app in front of it.
 
@@ -105,7 +104,7 @@ apple-cli examines the signed `Cf-Access-Jwt-Assertion` header on each request. 
 
 If you do not give `--access-port`, the second listener does not start.
 
-### Send whole apps to the server
+#### Send whole apps to the server
 
 On a laptop, set `remote.url` in `~/.config/apple-cli/config.json` to the always-on Mac. Then each command for Mail, Messages, Reminders, Calendar, Contacts, and Notes runs on that Mac. The output ends with `(ran on the mini)`. To change the list of apps, set `remote.apps`.
 
@@ -117,9 +116,14 @@ All of the commands for one app go to the same Mac. The reason is that IDs are d
 - Both Macs must have the same version. If the versions are different, the router refuses the command.
 - Notes and Mail update their local copies only while they are open. On the server, open them again in the background on a schedule.
 
+</details>
+
 ## Commands
 
 Add `--json` to a command to get JSON output.
+
+<details>
+<summary>All commands</summary>
 
 ```
 apple-cli notes list [--folder NAME] [--limit N]
@@ -196,6 +200,8 @@ apple-cli serve --host IP [--port 7790] [--token-file PATH] [--writes] [--access
 
 `--at` accepts `YYYY-MM-DD [HH:MM]`, `today|tomorrow [HH:MM]`, `+30m`, `+2h`, or `+1d`. If you do not give `--at`, the reminder is for tomorrow at the default time. Each reminder gets a due date and an alarm at that time.
 
+</details>
+
 ## Sending
 
 1. The agent runs `messages draft` or `mail draft`. The command finds the recipient and saves a draft with an ID, for example `d_1a2b3c4d`. The draft shows exactly what will go out.
@@ -217,6 +223,9 @@ apple-cli serve --host IP [--port 7790] [--token-file PATH] [--writes] [--access
 
 apple-cli makes `~/.config/apple-cli/config.json` on the first run. Each app has optional rules in that file. If a key is missing, apple-cli uses the default.
 
+<details>
+<summary>Rules for each app</summary>
+
 | App | Rules |
 |---|---|
 | Notes | `excludeTitlePatterns`, `excludeFolders`, `excludeNoteIDs`. Notes with a password are always hidden. |
@@ -231,6 +240,8 @@ apple-cli makes `~/.config/apple-cli/config.json` on the first run. Each app has
 | Shortcuts | `excludeNamePatterns` |
 | Calls | `excludeHandles`, `excludeNamePatterns` |
 
+</details>
+
 - A hidden item never prints, and search does not find it. A `read` or `append` on a hidden note stops with the error "hidden by privacy config".
 - The default rules hide notes with titles that look like credentials, and journal notes.
 - A contact that is hidden in Contacts is also hidden in Messages, Mail, and call history.
@@ -238,6 +249,9 @@ apple-cli makes `~/.config/apple-cli/config.json` on the first run. Each app has
 - `maskOneTimeCodes` is on by default. A text with a verification code shows as `[one-time code hidden]`, and search does not find it. For Mail, it also hides sign-in and password-reset email.
 
 ## Known behavior
+
+<details>
+<summary>Limits that come from the Apple apps</summary>
 
 - `notes append` refuses a note with a checklist, table, image, hashtag, or link, unless you add `--force`. The reason is that Notes writes the full body again on an append from a script, and it removes those items.
 - A checkbox line in Markdown becomes a plain bullet. Notes scripting cannot make a checklist.
@@ -247,6 +261,8 @@ apple-cli makes `~/.config/apple-cli/config.json` on the first run. Each app has
 - The Mail index changes only while Mail.app runs. Thus, each Mail list gives `indexedThrough`, and a `warning` if the index is more than one day old.
 - `shortcuts read` gives only the identifiers of the actions. It never gives their parameters, because parameters can contain URLs and tokens.
 - `person`, `today`, and `search` read each app separately. If one app fails, the other apps still give results, and the failure shows in `errors`.
+
+</details>
 
 ## Test
 
@@ -262,3 +278,7 @@ For each app, the test makes a test item through the write path. Then it reads t
 2. Add `Sources/AppleKit/Domains/<App>.swift`. Give it a settings struct, a `Domain`, and its commands. Mark each command `.read`, `.write`, or `.destructive`.
 3. Add the domain to `allDomains` in `Core/Interface.swift`.
 4. Add `scripts/e2e/<app>.py`, and add it to `run.py`.
+
+## License
+
+[MIT](LICENSE)
